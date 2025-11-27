@@ -126,9 +126,9 @@ class IdsDashboard(App):
         """Called when app starts."""
         table = self.query_one(DataTable)
         if self.use_multiclass:
-            table.add_columns("Time", "IP", "Method", "Status", "URI", "Attack Type", "Confidence")
+            table.add_columns("Time", "IP", "Port", "Method", "Status", "URI", "Attack Type", "Confidence")
         else:
-            table.add_columns("Time", "IP", "Method", "Status", "URI", "Prediction", "Conf")
+            table.add_columns("Time", "IP", "Port", "Method", "Status", "URI", "Prediction", "Conf")
         table.fixed_columns = 1
 
         # Start ZMQ Listener in a background thread
@@ -151,28 +151,59 @@ class IdsDashboard(App):
                 features = payload['features']
                 meta = payload['metadata']
 
+                # Debug output
+                print(f"📥 Received: IP={meta.get('ip', 'unknown')}, Port={meta.get('port', 'unknown')}, Features={len(features)}")
+
                 # Inference
-                if self.use_multiclass:
-                    # Multi-class prediction
-                    prediction_result = self.model.predict(features)
-                else:
-                    # Binary prediction
-                    with torch.no_grad():
-                        input_tensor = torch.tensor([features])
-                        output = self.model(input_tensor)
-                        probabilities = output.tolist()[0] # [Prob_Safe, Prob_Attack]
+                try:
+                    if self.use_multiclass:
+                        # Multi-class prediction
+                        prediction_result = self.model.predict(features)
+                        if not prediction_result:  # Model failed to load
+                            print("❌ Multi-class model prediction failed, falling back to binary")
+                            # Binary prediction fallback
+                            with torch.no_grad():
+                                input_tensor = torch.tensor([features])
+                                output = self.model(input_tensor)
+                                probabilities = output.tolist()[0] # [Prob_Safe, Prob_Attack]
 
-                        is_attack = probabilities[1] > 0.5
-                        confidence = probabilities[1] if is_attack else probabilities[0]
-                        prediction_result = {
-                            'is_attack': is_attack,
-                            'confidence': confidence,
-                            'predicted_class': 'attack' if is_attack else 'normal',
-                            'all_probabilities': {'safe': probabilities[0], 'attack': probabilities[1]}
-                        }
+                                is_attack = probabilities[1] > 0.5
+                                confidence = probabilities[1] if is_attack else probabilities[0]
+                                prediction_result = {
+                                    'is_attack': is_attack,
+                                    'confidence': confidence,
+                                    'predicted_class': 'attack' if is_attack else 'normal',
+                                    'all_probabilities': {'safe': probabilities[0], 'attack': probabilities[1]}
+                                }
+                    else:
+                        # Binary prediction
+                        with torch.no_grad():
+                            input_tensor = torch.tensor([features])
+                            output = self.model(input_tensor)
+                            probabilities = output.tolist()[0] # [Prob_Safe, Prob_Attack]
 
-                # Update UI (Must be done via post_message to be thread-safe)
-                self.post_message(NewLogEntry(meta, prediction_result))
+                            is_attack = probabilities[1] > 0.5
+                            confidence = probabilities[1] if is_attack else probabilities[0]
+                            prediction_result = {
+                                'is_attack': is_attack,
+                                'confidence': confidence,
+                                'predicted_class': 'attack' if is_attack else 'normal',
+                                'all_probabilities': {'safe': probabilities[0], 'attack': probabilities[1]}
+                            }
+
+                    # Debug output
+                    if self.use_multiclass:
+                        print(f"🔍 Multi-class result: {prediction_result.get('predicted_class', 'unknown')} (conf: {prediction_result.get('confidence', 0):.2f})")
+                    else:
+                        print(f"🔍 Binary result: {prediction_result.get('predicted_class', 'unknown')} (conf: {prediction_result.get('confidence', 0):.2f})")
+
+                    # Update UI (Must be done via post_message to be thread-safe)
+                    self.post_message(NewLogEntry(meta, prediction_result))
+
+                except Exception as e:
+                    print(f"❌ Error processing message: {e}")
+                    # Log error to internal log but don't crash
+                    continue
 
             except Exception as e:
                 # Log error to internal log but don't crash
@@ -212,13 +243,13 @@ class IdsDashboard(App):
 
                 # Add to Alerts Log (Bottom Panel) with specific attack type
                 log_widget = self.query_one("#alerts-log", Log)
-                log_widget.write_line(f"[{timestamp}] ⚠️  {message.predicted_class.upper()} DETECTED from {data.get('ip', 'unknown')} | {data.get('uri', 'unknown')}")
+                log_widget.write_line(f"[{timestamp}] ⚠️  {message.predicted_class.upper()} DETECTED from {data.get('ip', 'unknown')}:{data.get('port', 'unknown')} | {data.get('uri', 'unknown')}")
             else:
                 pred_text = Text("ATTACK", style="bold red")
 
                 # Add to Alerts Log (Bottom Panel)
                 log_widget = self.query_one("#alerts-log", Log)
-                log_widget.write_line(f"[{timestamp}] ⚠️  ATTACK DETECTED from {data.get('ip', 'unknown')} | {data.get('uri', 'unknown')}")
+                log_widget.write_line(f"[{timestamp}] ⚠️  ATTACK DETECTED from {data.get('ip', 'unknown')}:{data.get('port', 'unknown')} | {data.get('uri', 'unknown')}")
         else:
             if self.use_multiclass:
                 pred_text = Text(message.predicted_class.upper(), style="bold green")
@@ -242,7 +273,8 @@ class IdsDashboard(App):
         if self.use_multiclass:
             table.add_row(
                 timestamp,
-                data.get('ip', 'unknown'),
+                data.get('ip', 'unknown'),           # IP column
+                str(data.get('port', 'unknown')),   # Port column
                 data.get('method', 'unknown'),
                 str(data.get('status', 'unknown')),
                 uri_display,
@@ -252,7 +284,8 @@ class IdsDashboard(App):
         else:
             table.add_row(
                 timestamp,
-                data.get('ip', 'unknown'),
+                data.get('ip', 'unknown'),           # IP column
+                str(data.get('port', 'unknown')),   # Port column
                 data.get('method', 'unknown'),
                 str(data.get('status', 'unknown')),
                 uri_display,

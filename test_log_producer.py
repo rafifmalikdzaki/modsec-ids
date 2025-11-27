@@ -91,7 +91,7 @@ class TestLogProducer:
 
         # Base metadata
         metadata = {
-            'timestamp': time.strftime('%d/%b/%Y:%H:%M:%S %z'),
+            'timestamp': time.strftime('%d/%b/%Y %H:%M:%S'),
             'remote_addr': f"192.168.{random.randint(1,255)}.{random.randint(1,255)}",
             'method': 'GET' if random.random() > 0.3 else 'POST',
             'uri': '/',
