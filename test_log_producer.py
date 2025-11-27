@@ -89,10 +89,15 @@ class TestLogProducer:
         """Generate realistic metadata for a test sample."""
         class_name = self.class_names[label_idx]
 
+        # Generate IP and Port
+        ip = f"192.168.{random.randint(1,255)}.{random.randint(1,255)}"
+        port = random.choice([80, 443, 8080, 8443, 3000, 8000, 9000])
+
         # Base metadata
         metadata = {
-            'timestamp': time.strftime('%d/%b/%Y %H:%M:%S'),
-            'remote_addr': f"192.168.{random.randint(1,255)}.{random.randint(1,255)}",
+            'ip': ip,
+            'port': str(port),
+            'remote_addr': ip,  # Keep for compatibility
             'method': 'GET' if random.random() > 0.3 else 'POST',
             'uri': '/',
             'protocol': 'HTTP/1.1',
