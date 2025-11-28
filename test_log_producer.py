@@ -25,13 +25,13 @@ from typing import Dict, List, Optional
 
 # TensorFlow imports for semantic model testing
 try:
-    from tensorflow_semantic_inference import TensorFlowSemanticInference
+    from detectors.tensorflow_semantic_inference import TensorFlowSemanticInference
     TENSORFLOW_INFERENCE_AVAILABLE = True
 except ImportError:
     TENSORFLOW_INFERENCE_AVAILABLE = False
 
 # Import existing test data utilities
-from data_preprocessor import SemanticTextPreprocessor
+from detectors.data_preprocessor import SemanticTextPreprocessor
 
 class TestLogProducer:
     def __init__(self, test_data_path: str, zmq_port: int = 5555, shuffle: bool = True):

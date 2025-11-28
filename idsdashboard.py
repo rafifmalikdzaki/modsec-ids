@@ -13,8 +13,8 @@ from textual.message import Message
 from textual import work
 from rich.text import Text
 
-from security_model import AttackClassifier
-from multiclass_security_model import MultiClassAttackClassifier
+from detectors.security_model import AttackClassifier
+from detectors.multiclass_security_model import MultiClassAttackClassifier
 
 # ZMQ Configuration
 ZMQ_HOST = "localhost"

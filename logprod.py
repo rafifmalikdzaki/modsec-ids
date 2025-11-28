@@ -10,14 +10,14 @@ from pathlib import Path
 
 # Import the new TensorFlow inference engine
 try:
-    from tensorflow_semantic_inference import TensorFlowSemanticInference
+    from detectors.tensorflow_semantic_inference import TensorFlowSemanticInference
     TENSORFLOW_AVAILABLE = True
 except ImportError:
     print("⚠️  TensorFlow inference module not found or failed to load.")
     TENSORFLOW_AVAILABLE = False
 
 # Import existing feature extractor for metadata
-from security_model import FeatureExtractor
+from detectors.security_model import FeatureExtractor
 
 # Configuration
 DEFAULT_LOG_FILE = 'data/raw/access.txt'
