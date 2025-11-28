@@ -1,13 +1,11 @@
 # ModSecurity IDS: Real-Time Semantic Attack Detection
 
-A machine learning-based Intrusion Detection System (IDS) that detects and classifies web attacks in real-time using ModSecurity logs. This system employs a hybrid approach, utilizing both Feature-Based Feed-Forward Neural Networks (FFNN) and Semantic LSTM (Long Short-Term Memory) models to identify 8 distinct types of web attacks.
+A machine learning-based Intrusion Detection System (IDS) that detects and classifies web attacks in real-time using ModSecurity logs. This system employs a **Character-Level LSTM (Long Short-Term Memory)** model to analyze the semantic structure of payloads, making it highly robust against obfuscation.
 
 ## 🚀 Key Features
 
 *   **Real-Time Detection**: Streams and analyzes log data instantly using ZeroMQ.
-*   **Hybrid AI Models**:
-    *   **Semantic LSTM**: Analyzes the *meaning* of payloads (SQLi, XSS, etc.) using Natural Language Processing (NLP) with specialized tokenization for web attacks.
-    *   **Feature-Based FFNN**: Analyzes statistical features (length, special characters, etc.).
+*   **Character-Level Analysis**: The AI reads payloads character-by-character (like a human reading code), eliminating "Out of Vocabulary" errors and detecting hidden patterns in obfuscated attacks.
 *   **Multi-Class Classification**: Detects 8 specific classes:
     *   `Normal` (Safe Traffic)
     *   `SQL Injection (SQLi)`
@@ -16,7 +14,6 @@ A machine learning-based Intrusion Detection System (IDS) that detects and class
     *   `Remote File Inclusion (RFI)`
     *   `Remote Code Execution (RCE)`
     *   `Directory Traversal`
-    *   `Command Injection`
     *   `Brute Force`
 *   **Interactive Dashboard**: A terminal-based UI (TUI) for monitoring traffic, visualizing attack trends, and viewing detailed alerts.
 *   **Atomic Testing**: Tools to instantly test individual attack payloads against the model.
@@ -30,13 +27,13 @@ The system consists of these main components:
 3.  **Log Producers**: Clients that read logs and send them to the API Producer.
     *   `logprod.py`: Reads real log files (e.g., `access.txt`).
     *   `test_log_producer.py`: Generates synthetic test traffic.
-4.  **Training Pipeline**: Scripts in `training/` to preprocess data and train the models with improved special character handling.
+4.  **Training Pipeline**: `training/train_tensorflow_working.py` handles data balancing, preprocessing, and training the Char-CNN-LSTM model.
 
 ## 🛠️ Installation & Setup
 
 ### Prerequisites
 - Python 3.10+
-- [uv](https://github.com/astral-sh/uv) (Recommended for dependency management)
+- [uv](https://github.com/astral-sh/uv) (Recommended) or `pip`.
 
 ### Setup
 1.  **Clone the repository:**
@@ -83,23 +80,25 @@ Send traffic to the engine.
     ```bash
     uv run python tools/test_sample.py "GET /login.php?user=' OR 1=1"
     ```
-    *(See `ATOMIC_TESTING_GUIDE.md` for more)*
 
 ## 🧠 Model Training
 
 If you need to retrain the models on new data:
 
-### Semantic LSTM Model (TensorFlow)
-The most accurate model for payload analysis.
 ```bash
-# Train the semantic model
 uv run python training/train_tensorflow_working.py --input data/raw/Modsec-WP.csv --epochs 20
 ```
+*   **Input**: Raw CSV dataset.
+*   **Preprocessing**: URL Decoding -> Lowercasing -> Character Tokenization.
+*   **Balancing**: Automatic oversampling of minority classes (XSS, RCE, etc.) and undersampling of majority (SQLi).
 
 ## 📂 Project Structure
 
-*   `detectors/`: Core detection logic (`tensorflow_semantic_inference.py`, `security_model.py`)
-*   `training/`: Model training scripts.
+*   `detectors/`: Core detection logic.
+    *   `tensorflow_semantic_inference.py`: Inference engine (loads model, preprocesses text).
+    *   `security_model.py`: Feature extraction logic (for metadata).
+*   `training/`:
+    *   `train_tensorflow_working.py`: Main training script (Preprocessing -> Balancing -> Training).
 *   `tools/`: Utility scripts.
     *   `api_log_producer.py`: HTTP Inference Server.
     *   `test_sample.py`: Atomic testing tool.

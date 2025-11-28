@@ -12,8 +12,8 @@ def inspect(file_path):
     
     # Filter for attacks
     if 'label' in df.columns:
-        print("Filtering for LFI...")
-        df = df[df['label'].str.lower().str.strip() == 'lfi']
+        print("Filtering for RFI...")
+        df = df[df['label'].str.lower().str.strip() == 'rfi']
     
     cols = ['request_line_method', 'request_line_url', 'request_useragent', 'action_message', 'request_body']
     print("\n🔍 Sample Data (First 5 rows):")

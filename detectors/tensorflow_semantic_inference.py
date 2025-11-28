@@ -5,6 +5,7 @@ import urllib.parse
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tokenizers import ByteLevelBPETokenizer
 import logging
 
 # Configure logging
@@ -16,109 +17,116 @@ class TensorFlowSemanticInference:
         self.model = None
         self.tokenizer = None
         self.label_encoder = None
-        self.max_seq_length = 1000  # Must match training (Character Level)
-        self.classes = ['normal', 'sqli', 'bruteforce', 'lfi', 'xss', 'rce', 'directory_traversal', 'command_injection', 'rfi']
+        self.max_seq_length = 500  # Increased to match training
+        self.classes = []
         
         self._load_artifacts()
 
     def _load_artifacts(self):
         """Load model, tokenizer, and label encoder."""
         try:
-            # Load Model (Prefer best_model.keras)
+            # Load Model
             model_path = os.path.join(self.model_dir, 'best_model.keras')
             if not os.path.exists(model_path):
                 model_path = os.path.join(self.model_dir, 'final_model.keras')
             
-            if not os.path.exists(model_path):
-                logging.error(f"Model not found at {model_path}")
-                return
-
-            self.model = load_model(model_path)
-            logging.info(f"✅ Model loaded from {model_path}")
-
-            # Load Tokenizer
-            tokenizer_path = os.path.join(self.model_dir, 'tokenizer.pkl')
-            if os.path.exists(tokenizer_path):
-                with open(tokenizer_path, 'rb') as f:
-                    self.tokenizer = pickle.load(f)
-                logging.info(f"✅ Tokenizer loaded from {tokenizer_path}")
+            if os.path.exists(model_path):
+                self.model = load_model(model_path)
+                logging.info(f"✅ Model loaded from {model_path}")
             else:
-                logging.error(f"Tokenizer not found at {tokenizer_path}")
+                logging.error(f"Model not found at {model_path}")
+
+            # Load BPE Tokenizer
+            vocab_path = os.path.join(self.model_dir, 'vocab.json')
+            merges_path = os.path.join(self.model_dir, 'merges.txt')
+            
+            if os.path.exists(vocab_path) and os.path.exists(merges_path):
+                self.tokenizer = ByteLevelBPETokenizer(vocab_path, merges_path)
+                logging.info(f"✅ BPE Tokenizer loaded")
+            else:
+                logging.error(f"BPE Tokenizer files not found in {self.model_dir}")
 
             # Load Label Encoder
             encoder_path = os.path.join(self.model_dir, 'label_encoder.pkl')
             if os.path.exists(encoder_path):
                 with open(encoder_path, 'rb') as f:
                     self.label_encoder = pickle.load(f)
-                # Update classes from encoder to ensure correct mapping
                 if hasattr(self.label_encoder, 'classes_'):
                     self.classes = self.label_encoder.classes_.tolist()
-                logging.info(f"✅ Label encoder loaded from {encoder_path}")
+                logging.info(f"✅ Label encoder loaded")
             else:
-                logging.warning(f"Label encoder not found. Using default classes.")
+                logging.warning(f"Label encoder not found.")
 
         except Exception as e:
             logging.error(f"Error loading artifacts: {e}")
 
     def _preprocess_text(self, text):
-        """Add spaces around special characters so they are tokenized."""
+        """Preprocessing with Feature Injection (Must match training)."""
         if not isinstance(text, str):
             return ""
-            
-        # 1. URL Decode first
+        
+        # 1. URL Decode
         try:
             text = urllib.parse.unquote(text)
         except Exception:
             pass
             
         # 2. Lowercase
-        text = text.lower()
+        text = text.lower().strip()
         
-        # 3. Space out special characters
-        special_chars = '!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\''
-        for char in special_chars:
-            text = text.replace(char, f' {char} ')
-        return " ".join(text.split())
+        # 3. Feature Injection (Heuristic hints)
+        flags = []
+        
+        # RFI: http/https in parameters
+        if "http://" in text or "https://" in text or "ftp://" in text:
+            flags.append("[FLAG_RFI]")
+            
+        # Traversal / LFI
+        if "../" in text or "..\\" in text or "/etc/passwd" in text or "win.ini" in text:
+            flags.append("[FLAG_TRAVERSAL]")
+            
+        # XSS
+        if "<script" in text or "javascript:" in text or "onerror=" in text or "onload=" in text:
+            flags.append("[FLAG_XSS]")
+            
+        # SQLi
+        if "union select" in text or " or 1=1" in text or "'--" in text or "information_schema" in text:
+            flags.append("[FLAG_SQLI]")
+            
+        # RCE
+        if "; cat" in text or "| ls" in text or "$(whoami)" in text or "; system" in text:
+            flags.append("[FLAG_RCE]")
+
+        # Append flags to text
+        if flags:
+            text = " ".join(flags) + " " + text
+            
+        return text
 
     def predict(self, text):
-        """
-        Predict the class of a given log line/text.
-        Returns: (predicted_class_name, confidence_score, all_probabilities)
-        """
         if not self.model or not self.tokenizer:
             return "error", 0.0, {}
 
         try:
-            # Preprocess
             clean_text = self._preprocess_text(text)
-            print(f"DEBUG: Preprocessed text: '{clean_text}'") # Debug
-            sequences = self.tokenizer.texts_to_sequences([clean_text])
-            print(f"DEBUG: Sequences: {sequences}") # Debug
-            padded = pad_sequences(sequences, maxlen=self.max_seq_length, padding='post', truncating='post')
+            
+            # BPE Encoding
+            encoded = self.tokenizer.encode(clean_text)
+            sequence = encoded.ids
+            
+            # Padding
+            padded = pad_sequences([sequence], maxlen=self.max_seq_length, padding='post', truncating='post')
 
             # Inference
             preds = self.model.predict(padded, verbose=0)[0]
             
-            # Get result
             class_idx = np.argmax(preds)
             confidence = float(preds[class_idx])
             
-            predicted_label = None
-            if self.label_encoder:
-                try:
-                    encoded_val = self.label_encoder.inverse_transform([class_idx])[0]
-                    # If encoder returns an integer (was trained on indices), map it to string class
-                    if isinstance(encoded_val, (int, np.integer)):
-                         predicted_label = self.classes[encoded_val] if encoded_val < len(self.classes) else "unknown"
-                    else:
-                         predicted_label = str(encoded_val)
-                except Exception:
-                    pass
+            predicted_label = "unknown"
+            if class_idx < len(self.classes):
+                predicted_label = self.classes[class_idx]
 
-            if predicted_label is None:
-                predicted_label = self.classes[class_idx] if class_idx < len(self.classes) else "unknown"
-
-            # Format probabilities
             probs = {cls: float(preds[i]) for i, cls in enumerate(self.classes) if i < len(preds)}
 
             return predicted_label, confidence, probs
@@ -126,11 +134,3 @@ class TensorFlowSemanticInference:
         except Exception as e:
             logging.error(f"Prediction error: {e}")
             return "error", 0.0, {}
-
-if __name__ == "__main__":
-    # Simple test
-    detector = TensorFlowSemanticInference()
-    test_log = "GET /wp-admin/admin-ajax.php?action=revslider_show_image&img=../wp-config.php HTTP/1.1"
-    label, conf, _ = detector.predict(test_log)
-    print(f"Test Log: {test_log}")
-    print(f"Prediction: {label} ({conf:.2%})")

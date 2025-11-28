@@ -33,8 +33,7 @@ try:
 except ImportError:
     TENSORFLOW_INFERENCE_AVAILABLE = False
 
-# Import existing test data utilities
-from detectors.data_preprocessor import SemanticTextPreprocessor
+
 
 class TestLogProducer:
     def __init__(self, test_data_path: str, zmq_port: int = 5555, shuffle: bool = True, api_url: str = None):
