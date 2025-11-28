@@ -12,4 +12,3 @@ wheels/
 # Model files
 *.h5
 *.keras
-*.pkl
