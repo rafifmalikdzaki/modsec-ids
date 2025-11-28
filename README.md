@@ -1,6 +1,6 @@
 # ModSecurity IDS: Real-Time Semantic Attack Detection
 
-A machine learning-based Intrusion Detection System (IDS) that detects and classifies web attacks in real-time using ModSecurity logs. This system employs a **Character-Level LSTM (Long Short-Term Memory)** model to analyze the semantic structure of payloads, making it highly robust against obfuscation.
+A machine learning-based Intrusion Detection System (IDS) that detects and classifies web attacks in real-time using ModSecurity logs. This system employs a **Character-Aware CNN-LSTM (Convolutional Neural Network - Long Short-Term Memory)** model to analyze the semantic structure of payloads, making it highly robust against obfuscation.
 
 ## 🚀 Key Features
 
@@ -67,8 +67,11 @@ uv run python idsdashboard.py --semantic
 Send traffic to the engine.
 
 *   **Option A: Monitor Real Logs**
+    This will read existing lines from `data/raw/access.txt` and then continuously monitor for new lines. If you want to process existing lines first and then continuously monitor, omit the `--continuous` flag. If you use `--continuous`, it will only start monitoring from the current end of the file.
     ```bash
-    uv run python logprod.py --input data/raw/access.txt --continuous --api-url http://localhost:8000
+    uv run python logprod.py --input data/raw/access.txt --api-url http://localhost:8000
+    # To continuous monitor ONLY new lines (skip existing lines), add --continuous
+    # uv run python logprod.py --input data/raw/access.txt --continuous --api-url http://localhost:8000
     ```
 
 *   **Option B: Run Full Test Suite**

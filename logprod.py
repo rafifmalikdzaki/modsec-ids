@@ -19,7 +19,7 @@ except ImportError:
     TENSORFLOW_AVAILABLE = False
 
 # Import existing feature extractor for metadata
-from detectors.security_model import FeatureExtractor
+
 
 # Configuration
 DEFAULT_LOG_FILE = 'data/raw/access.txt'
@@ -41,6 +41,26 @@ def sanitize_for_json(obj):
         return [sanitize_for_json(i) for i in obj]
     return obj
 
+import re
+import urllib.parse
+# Regex to parse standard Combined Log Format
+LOG_PATTERN = re.compile(
+    r'(?P<ip>[\d\.]+) - - \[(?P<timestamp>.*?)\] "(?P<method>\w+) (?P<uri>.*?) (?P<protocol>HTTP\/[\d\.]+)" (?P<status>\d+) (?P<size>\d+) "(?P<referer>.*?)" "(?P<user_agent>.*?)"'
+)
+
+def _parse_raw_log_line(log_line):
+    """
+    Parses a raw log line using regex and extracts relevant components.
+    Returns a dictionary of extracted data or None if parsing fails.
+    """
+    match = LOG_PATTERN.match(log_line)
+    if not match:
+        return None
+    data = match.groupdict()
+    # Ensure URI is unquoted and lowercased for consistent feature extraction
+    data['decoded_uri'] = urllib.parse.unquote(data['uri']).lower()
+    return data
+
 class LogProducer:
     def __init__(self, port=ZMQ_PORT, api_url=None):
         self.port = port
@@ -59,8 +79,7 @@ class LogProducer:
         else:
             self.socket = None # No local ZMQ binding
 
-        # Initialize Inference Engines
-        self.extractor = FeatureExtractor(use_enhanced=False, use_semantic=True)
+
         
         if self.api_url:
             print(f"🌐 Using Remote API for inference: {self.api_url}")
@@ -96,58 +115,85 @@ class LogProducer:
             return
 
         try:
-            # 1. Feature Extraction (Secondary/Metadata)
-            # We perform this FIRST so we can send metadata (IP/Port) to the API
-            features, metadata = self.extractor.parse_and_extract(line)
+            parsed_data = _parse_raw_log_line(line)
+            if not parsed_data:
+                print(f"⚠️  Could not parse log line: {line.strip()}")
+                return
 
-            if features:
-                # 2. TensorFlow Semantic Inference (Primary)
-                semantic_result = {}
-                
-                if self.api_url:
-                    # Remote Inference (Pass metadata so API uses correct IP)
-                    label, conf, probs = self._call_remote_api(line.strip(), metadata)
-                    if label != 'error':
-                        semantic_result = {
-                            'semantic_prediction': label,
-                            'semantic_confidence': float(conf),
-                            'semantic_probs': probs
-                        }
-                elif self.tf_model:
-                    # Local Inference
-                    label, conf, probs = self.tf_model.predict(line.strip())
+            # Extract data from parsed log
+            ip = parsed_data['ip']
+            timestamp = parsed_data['timestamp']
+            method = parsed_data['method']
+            uri = parsed_data['uri']
+            status = parsed_data['status']
+            user_agent = parsed_data.get('user_agent', '')
+            
+            # Semantic text for the TF model
+            semantic_text = f"{method} {uri} {user_agent}"
+
+            semantic_result = {}
+            if self.api_url:
+                # Remote Inference
+                # Use the original log line for remote API if it processes the full log
+                # Otherwise, send the semantic_text if the API expects pre-extracted text
+                # For consistency with local processing, send semantic_text.
+                label, conf, probs = self._call_remote_api(semantic_text, parsed_data) 
+                if label != 'error':
                     semantic_result = {
                         'semantic_prediction': label,
                         'semantic_confidence': float(conf),
                         'semantic_probs': probs
                     }
-
-                # 3. Merge Results
-                # We inject the semantic results into metadata so the dashboard can use them
-                if semantic_result:
-                    metadata.update(semantic_result)
-                    # Also set a top-level 'is_attack' flag for easier consumption
-                    metadata['is_attack'] = semantic_result.get('semantic_prediction', 'normal') != 'normal'
-
-                payload = {
-                    'features': features,
-                    'metadata': metadata
+            elif self.tf_model:
+                # Local Inference
+                label, conf, probs = self.tf_model.predict(semantic_text)
+                semantic_result = {
+                    'semantic_prediction': label,
+                    'semantic_confidence': float(conf),
+                    'semantic_probs': probs
                 }
-                
-                # Sanitize payload for JSON serialization (fix int64 error)
-                payload = sanitize_for_json(payload)
+            elif self.tf_model:
+                # Local Inference
+                label, conf, probs = self.tf_model.predict(semantic_text)
+                semantic_result = {
+                    'semantic_prediction': label,
+                    'semantic_confidence': float(conf),
+                    'semantic_probs': probs
+                }
 
-                # 4. Publish (Only if not using remote API, OR if we want local publishing? 
-                # Actually, if using remote API, the API publishes. So we should NOT publish here.)
-                if not self.api_url:
-                    self.socket.send_string("logs", flags=zmq.SNDMORE)
-                    self.socket.send_json(payload)
+            # Construct metadata for dashboard
+            metadata = {
+                'ip': ip,
+                'timestamp': timestamp,
+                'method': method,
+                'uri': uri,
+                'status': status,
+                'user_agent': user_agent,
+                'raw': line.strip()
+            }
+            
+            if semantic_result:
+                metadata.update(semantic_result)
+                metadata['is_attack'] = semantic_result.get('semantic_prediction', 'normal') != 'normal'
+            else:
+                # Default if no semantic result (e.g., model not loaded)
+                metadata['semantic_prediction'] = 'unknown'
+                metadata['semantic_confidence'] = 0.0
+                metadata['is_attack'] = False
 
-                # Feedback
-                self._print_status(metadata)
-                
-                # Rate limiting for demo purposes (prevent flooding)
-                time.sleep(0.05)
+            payload = {
+                'metadata': metadata
+            }
+            
+            payload = sanitize_for_json(payload)
+
+            if not self.api_url:
+                self.socket.send_string("logs", flags=zmq.SNDMORE)
+                self.socket.send_json(payload)
+
+            self._print_status(metadata)
+            
+            time.sleep(0.05)
 
         except Exception as e:
             print(f"⚠️  Error processing line: {e}")
@@ -169,7 +215,7 @@ class LogProducer:
         else:
             status = f"🔴 {prediction.upper()}"
 
-        print(f"{status} Sent: {uri[:60]}...")
+        print(f"{status} Sent: {uri[:100]}...")
 
     def follow_file(self, filename):
         """Generator that mimics 'tail -f'."""
