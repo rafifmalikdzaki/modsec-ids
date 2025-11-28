@@ -59,9 +59,9 @@ The model is built using TensorFlow/Keras and consists of the following layers:
 
 ## ⚙️ Configuration (Current)
 
-*   `VOCAB_SIZE`: `10000` (BPE vocabulary size).
-*   `EMBEDDING_DIM`: `64`.
-*   `HIDDEN_DIM`: `256` (LSTM units).
+*   `VOCAB_SIZE`: `20000` (BPE vocabulary size).
+*   `EMBEDDING_DIM`: `128`.
+*   `HIDDEN_DIM`: `512` (LSTM units).
 *   `MAX_SEQ_LENGTH`: `256` (maximum sequence length in BPE tokens).
 *   `DROPOUT`: `0.4`.
 *   `BATCH_SIZE`: `32`.

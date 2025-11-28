@@ -72,6 +72,8 @@ Send traffic to the engine.
     uv run python logprod.py --input data/raw/access.txt --api-url http://localhost:8000
     # To continuous monitor ONLY new lines (skip existing lines), add --continuous
     # uv run python logprod.py --input data/raw/access.txt --continuous --api-url http://localhost:8000
+    # To save prediction results to a file (e.g., predictions.log)
+    uv run python logprod.py --input data/raw/access.txt --api-url http://localhost:8000 --output-file predictions.log
     ```
 
 *   **Option B: Run Full Test Suite**

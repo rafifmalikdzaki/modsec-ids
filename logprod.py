@@ -45,7 +45,7 @@ import re
 import urllib.parse
 # Regex to parse standard Combined Log Format
 LOG_PATTERN = re.compile(
-    r'(?P<ip>[\d\.]+) - - \[(?P<timestamp>.*?)\] "(?P<method>\w+) (?P<uri>.*?) (?P<protocol>HTTP\/[\d\.]+)" (?P<status>\d+) (?P<size>\d+) "(?P<referer>.*?)" "(?P<user_agent>.*?)"'
+    r'(?P<ip>[\d\.:]+) - - \[(?P<timestamp>.*?)\] (?:\"(?P<method>\w+) (?P<uri>.*?) (?P<protocol>HTTP\/[\d\.]+)\"|(?P<raw_request_line>\"-\")) (?P<status>\d+) (?P<size>\d+) \"(?P<referer>.*?)\" \"(?P<user_agent>.*?)\"'
 )
 
 def _parse_raw_log_line(log_line):
@@ -57,15 +57,33 @@ def _parse_raw_log_line(log_line):
     if not match:
         return None
     data = match.groupdict()
+
+    # Handle cases where request line is "-"
+    if data.get('raw_request_line') == '"-"':
+        data['method'] = ''
+        data['uri'] = ''
+        data['protocol'] = ''
+    
     # Ensure URI is unquoted and lowercased for consistent feature extraction
-    data['decoded_uri'] = urllib.parse.unquote(data['uri']).lower()
+    # Use data.get('uri', '') to safely access if it was not parsed
+    data['decoded_uri'] = urllib.parse.unquote(data.get('uri', '')).lower()
     return data
 
 class LogProducer:
-    def __init__(self, port=ZMQ_PORT, api_url=None):
+    def __init__(self, port=ZMQ_PORT, api_url=None, output_log_file=None):
         self.port = port
         self.api_url = api_url
         self.context = zmq.Context()
+        self.output_log_file = output_log_file
+        self.log_file_handle = None
+
+        if self.output_log_file:
+            try:
+                self.log_file_handle = open(self.output_log_file, 'a', encoding='utf-8')
+                print(f"📝 Logging predictions to {self.output_log_file}")
+            except IOError as e:
+                print(f"❌ Error: Could not open output log file {self.output_log_file}: {e}")
+                self.output_log_file = None # Disable logging to file if failed
         
         # Only bind ZMQ if not using a remote API for inference
         if not self.api_url:
@@ -215,7 +233,10 @@ class LogProducer:
         else:
             status = f"🔴 {prediction.upper()}"
 
-        print(f"{status} Sent: {uri[:100]}...")
+        status_line = f"{status} Sent: {uri[:100]}..."
+        print(status_line)
+        if self.log_file_handle:
+            self.log_file_handle.write(status_line + "\n")
 
     def follow_file(self, filename):
         """Generator that mimics 'tail -f'."""
@@ -252,6 +273,8 @@ class LogProducer:
     def close(self):
         if self.socket: # Only close if a socket was created
             self.socket.close()
+        if self.log_file_handle:
+            self.log_file_handle.close()
         self.context.term()
 
 def main():
@@ -259,11 +282,12 @@ def main():
     parser.add_argument('--input', type=str, default=DEFAULT_LOG_FILE, help='Input log file or pattern')
     parser.add_argument('--continuous', action='store_true', help='Monitor file in real-time (tail -f)')
     parser.add_argument('--bulk-process', action='store_true', help='Process all matching files and exit')
+    parser.add_argument('--output-file', type=str, help='Optional: File to save prediction results (e.g., predictions.log)')
     parser.add_argument('--api-url', type=str, help='URL of the API Log Producer (e.g., http://localhost:8000)')
     
     args = parser.parse_args()
     
-    producer = LogProducer(api_url=args.api_url)
+    producer = LogProducer(api_url=args.api_url, output_log_file=args.output_file)
 
     try:
         if args.bulk_process:

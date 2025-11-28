@@ -32,14 +32,14 @@ from tokenizers import ByteLevelBPETokenizer
 from tokenizers.processors import BertProcessing
 
 # Configuration
-VOCAB_SIZE = 10000
-EMBEDDING_DIM = 128
-HIDDEN_DIM = 512
-DROPOUT = 0.4
+VOCAB_SIZE = 10_000
+EMBEDDING_DIM = 64
+HIDDEN_DIM = 256
+DROPOUT = 0.25
 LEARNING_RATE = 0.0001
-EPOCHS = 20
-BATCH_SIZE = 32
-MAX_SEQ_LENGTH = 256 # Increased to 500
+EPOCHS = 5
+BATCH_SIZE = 64
+MAX_SEQ_LENGTH = 384 # Increased to 500
 
 # Classes
 CLASSES = ['normal', 'sqli', 'bruteforce', 'lfi', 'xss', 'rce', 'directory_traversal', 'command_injection', 'rfi']
