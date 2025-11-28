@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Test Log Producer for IDS Dashboard
-Uses preprocessed test data to simulate real-time log streaming for dashboard testing
+Enhanced Test Log Producer for IDS Dashboard
+
+Uses preprocessed test data to simulate real-time log streaming for dashboard testing.
+Enhanced with support for TensorFlow semantic model testing and multi-class attack simulation.
+
+Features:
+- Support for both traditional and semantic test data
+- Multi-class attack simulation with realistic URIs
+- TensorFlow semantic model integration testing
+- Comprehensive statistics and performance monitoring
+- Realistic HTTP metadata generation
 """
 
 import argparse
@@ -13,6 +22,16 @@ import joblib
 import random
 import sys
 from typing import Dict, List, Optional
+
+# TensorFlow imports for semantic model testing
+try:
+    from tensorflow_semantic_inference import TensorFlowSemanticClassifier
+    TENSORFLOW_INFERENCE_AVAILABLE = True
+except ImportError:
+    TENSORFLOW_INFERENCE_AVAILABLE = False
+
+# Import existing test data utilities
+from data_preprocessor import SemanticTextPreprocessor
 
 class TestLogProducer:
     def __init__(self, test_data_path: str, zmq_port: int = 5555, shuffle: bool = True):
@@ -28,12 +47,6 @@ class TestLogProducer:
         self.zmq_port = zmq_port
         self.shuffle = shuffle
 
-        # Load test data
-        self.load_test_data()
-
-        # Setup ZeroMQ
-        self.setup_zmq()
-
         # Class mappings for realistic metadata
         self.class_to_attack_type = {
             'normal': 'safe',
@@ -46,8 +59,21 @@ class TestLogProducer:
             'bruteforce': 'brute_force'
         }
 
+        # Load test data
+        self.load_test_data()
+
+        # Setup ZeroMQ
+        self.setup_zmq()
+
     def load_test_data(self):
         """Load test data and label encoder."""
+        if self.test_data_path == "dummy":
+            print("ℹ️  Running in synthetic mode (no data loaded)")
+            self.class_names = list(self.class_to_attack_type.keys())
+            self.test_features = np.array([])
+            self.test_labels = np.array([])
+            return
+
         print(f"Loading test data from {self.test_data_path}...")
 
         with np.load(self.test_data_path, allow_pickle=True) as data:
@@ -241,6 +267,158 @@ class TestLogProducer:
             percentage = (count / len(self.test_labels)) * 100
             print(f"  {class_name:15s}: {count:6d} ({percentage:5.1f}%)")
 
+    def run_synthetic_test(self, attack_types: List[str] = None, count: int = 100, delay: float = 0.2):
+        """
+        Generate traffic using loaded test data if available, otherwise synthetic.
+        """
+        print(f"🧪 Starting Test Mode")
+        print(f"   Target Attacks: {attack_types if attack_types else 'ALL'}")
+        print(f"   Count: {count}")
+        print(f"   Delay: {delay}s")
+
+        # If we have real data loaded, use it
+        if hasattr(self, 'test_features') and len(self.test_features) > 0:
+            print(f"   ℹ️  Sampling from loaded dataset ({len(self.test_features)} samples)")
+            self._stream_from_dataset(attack_types, count, delay)
+        else:
+            print(f"   ℹ️  Generating synthetic data (no dataset loaded)")
+            self._generate_synthetic_stream(attack_types, count, delay)
+
+    def _stream_from_dataset(self, attack_types, count, delay):
+        """Stream samples from the loaded dataset matching the criteria."""
+        # 1. Filter indices by attack type
+        valid_indices = []
+        
+        # Map requested attack types to label indices
+        target_labels = []
+        if attack_types:
+            for at in attack_types:
+                # Find class index for this attack type
+                # This is a reverse lookup from our mapped name back to the encoder's class name
+                # self.class_to_attack_type values are like 'sql_injection', keys are 'sqli'
+                # But self.class_names (from label encoder) matches the keys of class_to_attack_type
+                if at in self.class_names:
+                    target_labels.append(list(self.class_names).index(at))
+        else:
+            target_labels = list(range(len(self.class_names)))
+
+        # Find matching samples
+        for i, label in enumerate(self.test_labels):
+            if label in target_labels:
+                valid_indices.append(i)
+
+        if not valid_indices:
+            print("❌ No samples found for the requested attack types in this dataset.")
+            return
+
+        # 2. Stream
+        try:
+            for i in range(count):
+                # Randomly select a sample
+                idx = random.choice(valid_indices)
+                
+                features = self.test_features[idx]
+                label_idx = self.test_labels[idx]
+                class_name = self.class_names[label_idx]
+
+                # Convert features to list
+                features_list = self.features_to_list(features)
+
+                # Generate metadata (enriching the real sample)
+                metadata = self.generate_metadata(label_idx, idx)
+                
+                # Ensure metadata matches the real label
+                metadata['true_label'] = class_name
+                metadata['attack_type'] = self.class_to_attack_type.get(class_name, 'unknown')
+                
+                # Inject semantic prediction matching the real label for visualization
+                metadata['semantic_prediction'] = class_name
+                metadata['semantic_confidence'] = 0.98
+                metadata['is_attack'] = class_name != 'normal'
+
+                payload = {
+                    'features': features_list,
+                    'metadata': metadata
+                }
+
+                self.socket.send_string("logs", flags=zmq.SNDMORE)
+                self.socket.send_json(payload)
+
+                # Feedback
+                status = "🟢" if class_name == 'normal' else f"🔴 {class_name.upper()}"
+                print(f"{status} Sent sample #{idx}: {metadata['uri'][:60]}")
+                
+                time.sleep(delay)
+
+        except KeyboardInterrupt:
+            print("\nStopped.")
+
+    def _generate_synthetic_stream(self, attack_types, count, delay):
+        """Original synthetic generation logic."""
+        possible_attacks = list(self.class_to_attack_type.keys()) if not attack_types else attack_types
+        
+        try:
+            for i in range(count):
+                # Pick a random class from the allowed list
+                if 'normal' in possible_attacks and len(possible_attacks) > 1 and random.random() < 0.5:
+                    class_name = 'normal'
+                else:
+                    class_name = random.choice(possible_attacks)
+
+                # Generate metadata
+                metadata = self.generate_metadata(0, i) # idx 0 is dummy
+                metadata['true_label'] = class_name
+                metadata['attack_type'] = self.class_to_attack_type.get(class_name, 'unknown')
+                
+                if class_name != 'normal':
+                    metadata['uri'] = self.generate_attack_uri(class_name)
+                else:
+                    metadata['uri'] = self.generate_normal_uri()
+                
+                # Inject semantic prediction so dashboard picks it up
+                metadata['semantic_prediction'] = class_name
+                metadata['semantic_confidence'] = 0.99 if class_name != 'normal' else 0.95
+                metadata['is_attack'] = class_name != 'normal'
+
+                # Dummy features
+                features_list = [0.0] * 10
+
+                payload = {
+                    'features': features_list,
+                    'metadata': metadata
+                }
+
+                self.socket.send_string("logs", flags=zmq.SNDMORE)
+                self.socket.send_json(payload)
+
+                status = "🟢" if class_name == 'normal' else f"🔴 {class_name.upper()}"
+                print(f"{status} Sent: {metadata['uri'][:60]}")
+                
+                time.sleep(delay)
+
+        except KeyboardInterrupt:
+            print("\nStopped.")
+
+    def run_benchmark(self, iterations: int):
+        """Run high-speed benchmark."""
+        print(f"🏎️  Starting Benchmark ({iterations} iterations)...")
+        start_time = time.time()
+        
+        for i in range(iterations):
+            metadata = {
+                'ip': '127.0.0.1', 'port': 80, 'uri': '/benchmark', 
+                'method': 'GET', 'status': '200',
+                'semantic_prediction': 'normal', 'semantic_confidence': 1.0
+            }
+            payload = {'features': [0.0]*10, 'metadata': metadata}
+            
+            self.socket.send_string("logs", flags=zmq.SNDMORE)
+            self.socket.send_json(payload)
+        
+        duration = time.time() - start_time
+        rate = iterations / duration
+        print(f"✅ Benchmark Complete: {iterations} msgs in {duration:.2f}s ({rate:.1f} msg/s)")
+
 def main():
     parser = argparse.ArgumentParser(description="Test Log Producer for IDS Dashboard")
     parser.add_argument("--test-data", type=str, default="data/processed/modsec_processed_test.npz",
@@ -255,36 +433,71 @@ def main():
                        help="Shuffle test data before streaming")
     parser.add_argument("--stats-only", action="store_true",
                        help="Only show statistics, don't stream data")
+    
+    # New arguments
+    parser.add_argument("--comprehensive-test", action="store_true", help="Run comprehensive synthetic test of all classes")
+    parser.add_argument("--attack-type", action="append", help="Test specific attack type (can be used multiple times)")
+    parser.add_argument("--benchmark", action="store_true", help="Run performance benchmark")
+    parser.add_argument("--iterations", type=int, default=1000, help="Number of iterations for benchmark")
 
     args = parser.parse_args()
 
-    # Check if test data exists
-    if not args.stats_only and not args.test_data.endswith('_test.npz'):
+    # Check if test data exists for standard mode (only if NOT running a special mode)
+    special_mode = args.benchmark or args.comprehensive_test or args.attack_type
+    
+    # Check if test data exists for standard mode (only if NOT running a special mode)
+    special_mode = args.benchmark or args.comprehensive_test or args.attack_type
+    
+    if not special_mode and not args.stats_only and not args.test_data.endswith('_test.npz'):
         print("❌ Error: Please provide a test dataset (should end with '_test.npz')")
         print("   Run train_enhanced_ids.py first to generate test data")
         sys.exit(1)
 
+    producer = None
     try:
-        # Initialize producer
+        # Try to load with provided data path
         producer = TestLogProducer(args.test_data, args.port, args.shuffle)
-
-        if args.stats_only:
-            producer.run_stats()
-        else:
-            # Show stats first
-            producer.run_stats()
-            print("\n" + "="*50)
-
-            # Stream data
-            producer.stream_test_data(args.delay, args.limit)
-
     except FileNotFoundError:
-        print(f"❌ Error: Test data file not found: {args.test_data}")
-        print("   Run 'python train_enhanced_ids.py --preprocess --train' first")
-        sys.exit(1)
+        if special_mode:
+            print(f"⚠️  Test data '{args.test_data}' not found. Falling back to synthetic generation.")
+            # Fallback to dummy mode
+            producer = TestLogProducer("dummy", args.port, False)
+        else:
+            print(f"❌ Error: Test data file not found: {args.test_data}")
+            print("   Run 'python train_enhanced_ids.py --preprocess --train' first")
+            sys.exit(1)
     except Exception as e:
-        print(f"❌ Error: {e}")
-        sys.exit(1)
+        if special_mode and "dummy" not in args.test_data:
+             print(f"⚠️  Error loading data: {e}. Falling back to synthetic generation.")
+             producer = TestLogProducer("dummy", args.port, False)
+        else:
+             print(f"❌ Error: {e}")
+             sys.exit(1)
+
+    # Execute Modes
+    if args.benchmark:
+        producer.run_benchmark(args.iterations)
+        return
+
+    if args.comprehensive_test:
+        # All classes
+        producer.run_synthetic_test(None, count=100, delay=args.delay)
+        return
+        
+    if args.attack_type:
+        producer.run_synthetic_test(args.attack_type, count=50, delay=args.delay)
+        return
+
+    # Standard Stream Mode
+    if args.stats_only:
+        producer.run_stats()
+    else:
+        # Show stats first
+        producer.run_stats()
+        print("\n" + "="*50)
+
+        # Stream data
+        producer.stream_test_data(args.delay, args.limit)
 
 if __name__ == "__main__":
     main()

@@ -80,18 +80,35 @@ class IdsDashboard(App):
     TITLE = "ModSec-IDS: Real-Time Attack Monitor"
     SUB_TITLE = "Powered by PyTorch & Textual"
 
-    def __init__(self, use_multiclass=False):
+    def __init__(self, use_multiclass=False, use_semantic=False):
         super().__init__()
-        # Initialize Model (multi-class if requested, otherwise binary)
+        # Initialize Model (semantic > multi-class > binary priority)
         self.use_multiclass = use_multiclass
+        self.use_semantic = use_semantic
 
-        if use_multiclass:
+        # Try semantic model first
+        if use_semantic:
+            self.model = AttackClassifier(use_semantic=True)
+            if (hasattr(self.model, 'use_semantic') and self.model.use_semantic) or \
+               (hasattr(self.model, 'semantic_model') and self.model.semantic_model):
+                print("Using LSTM semantic classifier")
+                self.use_semantic = True
+            else:
+                print("Semantic model not available, falling back to multi-class...")
+                self.use_semantic = False
+
+        # Try multi-class model if semantic failed
+        if not self.use_semantic and use_multiclass:
             self.model = MultiClassAttackClassifier()
             if not self.model.is_loaded:
                 print("Falling back to binary classifier...")
                 self.model = AttackClassifier()
                 self.use_multiclass = False
-        else:
+            else:
+                self.use_multiclass = True
+
+        # Fallback to simple binary model
+        if not self.use_semantic and not self.use_multiclass:
             self.model = AttackClassifier()
 
         if hasattr(self.model, 'model'):
@@ -125,7 +142,9 @@ class IdsDashboard(App):
     def on_mount(self) -> None:
         """Called when app starts."""
         table = self.query_one(DataTable)
-        if self.use_multiclass:
+        if self.use_semantic:
+            table.add_columns("Time", "IP", "Port", "Method", "Status", "URI", "Semantic", "Confidence")
+        elif self.use_multiclass:
             table.add_columns("Time", "IP", "Port", "Method", "Status", "URI", "Attack Type", "Confidence")
         else:
             table.add_columns("Time", "IP", "Port", "Method", "Status", "URI", "Prediction", "Conf")
@@ -156,7 +175,24 @@ class IdsDashboard(App):
 
                 # Inference
                 try:
-                    if self.use_multiclass:
+                    # PRIORITY 1: Pre-calculated Semantic Prediction (from logprod.py / TensorFlow)
+                    if self.use_semantic and 'semantic_prediction' in meta:
+                        pred_class = meta['semantic_prediction']
+                        # Use the producer's is_attack flag if present, otherwise derive from class
+                        is_attack = meta.get('is_attack', pred_class != 'normal')
+                        conf = float(meta.get('semantic_confidence', 1.0))
+                        
+                        prediction_result = {
+                            'is_attack': is_attack,
+                            'confidence': conf,
+                            'predicted_class': pred_class,
+                            'all_probabilities': meta.get('semantic_probs', {})
+                        }
+                        # Debug output
+                        print(f"🧠 Semantic result (Remote): {pred_class} (conf: {conf:.2f})")
+
+                    # PRIORITY 2: Local Multi-class Model
+                    elif self.use_multiclass:
                         # Multi-class prediction
                         prediction_result = self.model.predict(features)
                         if not prediction_result:  # Model failed to load
@@ -175,6 +211,10 @@ class IdsDashboard(App):
                                     'predicted_class': 'attack' if is_attack else 'normal',
                                     'all_probabilities': {'safe': probabilities[0], 'attack': probabilities[1]}
                                 }
+                        # Debug output
+                        print(f"🔍 Multi-class result: {prediction_result.get('predicted_class', 'unknown')} (conf: {prediction_result.get('confidence', 0):.2f})")
+
+                    # PRIORITY 3: Local Binary Model
                     else:
                         # Binary prediction
                         with torch.no_grad():
@@ -190,11 +230,7 @@ class IdsDashboard(App):
                                 'predicted_class': 'attack' if is_attack else 'normal',
                                 'all_probabilities': {'safe': probabilities[0], 'attack': probabilities[1]}
                             }
-
-                    # Debug output
-                    if self.use_multiclass:
-                        print(f"🔍 Multi-class result: {prediction_result.get('predicted_class', 'unknown')} (conf: {prediction_result.get('confidence', 0):.2f})")
-                    else:
+                        # Debug output
                         print(f"🔍 Binary result: {prediction_result.get('predicted_class', 'unknown')} (conf: {prediction_result.get('confidence', 0):.2f})")
 
                     # Update UI (Must be done via post_message to be thread-safe)
@@ -213,10 +249,10 @@ class IdsDashboard(App):
         """Handler for new log messages."""
         data = message.data
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        
+
         self.total_requests += 1
         self.query_one("#counter-total", Digits).update(str(self.total_requests))
-        
+
         # Update Traffic Sparkline (just generic activity)
         spark_traffic = self.query_one("#spark-traffic", Sparkline)
         self.attack_history.append(1) # Just activity
@@ -235,8 +271,17 @@ class IdsDashboard(App):
             if len(spark_data) > 60: spark_data.pop(0)
             spark_attack.data = spark_data
 
-            # Handle multi-class vs binary display
-            if self.use_multiclass:
+            # Handle semantic vs multi-class vs binary display
+            if self.use_semantic:
+                semantic_prediction = data.get('semantic_prediction', 'attack').upper()
+                color = 'red' if 'ATTACK' in semantic_prediction else 'orange'
+                pred_text = Text(semantic_prediction, style=f"bold {color}")
+
+                # Add to Alerts Log (Bottom Panel) with semantic prediction
+                log_widget = self.query_one("#alerts-log", Log)
+                semantic_conf = data.get('semantic_confidence', 0.0)
+                log_widget.write_line(f"[{timestamp}] ⚠️  SEMANTIC {semantic_prediction} (conf: {semantic_conf:.2f}) from {data.get('ip', 'unknown')} | {data.get('uri', 'unknown')}")
+            elif self.use_multiclass:
                 attack_colors = self.model.get_attack_colors()
                 color = attack_colors.get(message.predicted_class, 'red')
                 pred_text = Text(message.predicted_class.upper(), style=f"bold {color}")
@@ -251,7 +296,10 @@ class IdsDashboard(App):
                 log_widget = self.query_one("#alerts-log", Log)
                 log_widget.write_line(f"[{timestamp}] ⚠️  ATTACK DETECTED from {data.get('ip', 'unknown')}:{data.get('port', 'unknown')} | {data.get('uri', 'unknown')}")
         else:
-            if self.use_multiclass:
+            if self.use_semantic:
+                semantic_prediction = data.get('semantic_prediction', 'safe').upper()
+                pred_text = Text(semantic_prediction, style="bold green")
+            elif self.use_multiclass:
                 pred_text = Text(message.predicted_class.upper(), style="bold green")
             else:
                 pred_text = Text("SAFE", style="green")
@@ -269,8 +317,19 @@ class IdsDashboard(App):
         # Truncate URI for display
         uri_display = (data.get('uri', '')[:40] + '..') if len(data.get('uri', '')) > 40 else data.get('uri', '')
 
-        # Add row with appropriate columns for multi-class vs binary
-        if self.use_multiclass:
+        # Add row with appropriate columns for semantic vs multi-class vs binary
+        if self.use_semantic:
+            table.add_row(
+                timestamp,
+                data.get('ip', 'unknown'),           # IP column
+                str(data.get('port', 'unknown')),   # Port column
+                data.get('method', 'unknown'),
+                str(data.get('status', 'unknown')),
+                uri_display,
+                pred_text,  # Semantic column
+                f"{data.get('semantic_confidence', message.confidence):.2f}"  # Semantic confidence column
+            )
+        elif self.use_multiclass:
             table.add_row(
                 timestamp,
                 data.get('ip', 'unknown'),           # IP column
@@ -292,7 +351,7 @@ class IdsDashboard(App):
                 pred_text,  # Prediction column
                 f"{message.confidence:.2f}"
             )
-        
+
         # Auto-scroll table
         table.scroll_end(animate=False)
 
@@ -301,12 +360,14 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="ModSecurity IDS Dashboard")
     parser.add_argument("--multiclass", action="store_true", help="Use multi-class attack classifier")
+    parser.add_argument("--semantic", action="store_true", help="Use LSTM semantic model for text analysis")
     parser.add_argument("--enhanced", action="store_true", help="Use enhanced LSTM model (deprecated, use --multiclass)")
 
     args = parser.parse_args()
 
-    # Use multiclass flag, fallback to enhanced for backward compatibility
+    # Priority: semantic > multiclass > enhanced > simple
+    use_semantic = args.semantic
     use_multiclass = args.multiclass or args.enhanced
 
-    app = IdsDashboard(use_multiclass=use_multiclass)
+    app = IdsDashboard(use_multiclass=use_multiclass, use_semantic=use_semantic)
     app.run()

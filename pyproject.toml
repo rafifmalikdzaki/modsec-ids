@@ -18,6 +18,7 @@ dependencies = [
   "textual>=6.6.0",
   "torch",
   "torchvision",
+  "tensorflow>=2.15.0",
 ]
 
 [tool.uv.sources]
