@@ -50,6 +50,9 @@ class TensorFlowSemanticInference:
             if os.path.exists(encoder_path):
                 with open(encoder_path, 'rb') as f:
                     self.label_encoder = pickle.load(f)
+                # Update classes from encoder to ensure correct mapping
+                if hasattr(self.label_encoder, 'classes_'):
+                    self.classes = self.label_encoder.classes_.tolist()
                 logging.info(f"✅ Label encoder loaded from {encoder_path}")
             else:
                 logging.warning(f"Label encoder not found. Using default classes.")
