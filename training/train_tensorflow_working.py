@@ -17,7 +17,7 @@ from pathlib import Path
 import tensorflow as tf
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout, Bidirectional
+from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout, Bidirectional, Conv1D, MaxPooling1D
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 
@@ -39,7 +39,7 @@ DROPOUT = 0.4
 LEARNING_RATE = 0.001
 EPOCHS = 20
 BATCH_SIZE = 32
-MAX_SEQ_LENGTH = 500 # Increased to 500
+MAX_SEQ_LENGTH = 256 # Increased to 500
 
 # Classes
 CLASSES = ['normal', 'sqli', 'bruteforce', 'lfi', 'xss', 'rce', 'directory_traversal', 'command_injection', 'rfi']
@@ -175,6 +175,8 @@ def create_model(vocab_size, max_seq_length, num_classes):
     print("🏗️  Building Subword LSTM model...")
     model = Sequential([
         Embedding(vocab_size, output_dim=EMBEDDING_DIM, input_length=max_seq_length),
+        Conv1D(filters=64, kernel_size=5, padding='same', activation='relu'),
+        MaxPooling1D(pool_size=2),
         Bidirectional(LSTM(HIDDEN_DIM, return_sequences=False, dropout=DROPOUT)),
         Dense(64, activation='relu'),
         Dropout(DROPOUT),

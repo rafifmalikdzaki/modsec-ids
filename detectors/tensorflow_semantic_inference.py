@@ -17,7 +17,7 @@ class TensorFlowSemanticInference:
         self.model = None
         self.tokenizer = None
         self.label_encoder = None
-        self.max_seq_length = 500  # Increased to match training
+        self.max_seq_length = 256
         self.classes = []
         
         self._load_artifacts()
