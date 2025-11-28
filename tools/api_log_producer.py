@@ -103,7 +103,7 @@ class LogRequestHandler(http.server.BaseHTTPRequestHandler):
         """Run inference on the log line."""
         if not detector:
             return {"error": "Model not loaded"}
-
+        
         start_time = time.time()
         label, conf, probs = detector.predict(log_line)
         inference_time = (time.time() - start_time) * 1000

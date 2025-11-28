@@ -1,6 +1,6 @@
 # 🧪 Prosedur Percobaan & Pengujian Sistem
 
-Dokumen ini berisi panduan langkah demi langkah untuk melakukan pengujian dan validasi sistem ModSec-IDS. Panduan ini mencakup persiapan, pengujian komponen individual, dan simulasi serangan penuh.
+Dokumen ini berisi panduan langkah demi langkah untuk melakukan pengujian dan validasi sistem ModSec-IDS. Sistem ini menggunakan **Character-Level LSTM** untuk mendeteksi serangan web secara semantik.
 
 ## 📋 Prasyarat
 
@@ -15,26 +15,9 @@ source .venv/bin/activate
 
 ---
 
-## 1. Pengujian Unit Komponen
+## 1. Simulasi Sistem Penuh (End-to-End) - Mode Cepat (Recommended)
 
-Sebelum menjalankan sistem secara utuh, verifikasi bahwa setiap komponen berfungsi dengan baik.
-
-### A. Tes Inferensi Model Semantik
-Pastikan model TensorFlow dapat memuat dan memprediksi serangan dari string teks mentah.
-
-1.  Buat skrip tes sederhana (atau gunakan `tools/test_sample.py`):
-    ```bash
-    uv run python tools/test_sample.py "GET /etc/passwd"
-    ```
-2.  **Hasil yang diharapkan:** Prediksi harus mendeteksi serangan (misalnya `lfi` atau `directory_traversal`) dengan confidence tinggi.
-
----
-
-## 2. Simulasi Sistem Penuh (End-to-End) - Mode Cepat (Recommended)
-
-Skenario ini mensimulasikan lingkungan produksi di mana `logprod.py` (atau `test_log_producer.py`) mengirimkan data log ke `idsdashboard.py`.
-
-Kita menggunakan **API Log Producer** untuk memuat model AI yang berat hanya sekali, sehingga producer klien (terminal 3) sangat ringan dan cepat.
+Skenario ini mensimulasikan lingkungan produksi. Kita menggunakan **API Log Producer** sebagai otak AI terpusat.
 
 ### Langkah 1: Jalankan Inference Engine (Terminal 1)
 Ini memuat model TensorFlow dan menunggu permintaan.
@@ -57,64 +40,60 @@ Kita akan mengirimkan seluruh dataset tes (`--full-test`) ke engine API (`--api-
 uv run python test_log_producer.py --full-test --api-url http://localhost:8000 --delay 0.1
 ```
 
-**Apa yang akan terjadi:**
-1.  **Terminal 3 (Producer):** Akan mengirimkan log ke API dan mencetak status.
-    *   `🟢 Sent sample #1: /wp-content/themes/style.css...`
-    *   `🔴 SQLI Sent sample #2: /login.php?user=' OR '1'='1...`
-2.  **Terminal 1 (API Engine):** Akan memproses request dan mencetak hasil inferensi.
-    *   `⚡ Analyzed: GET /login.php... -> sqli (99.8%)`
-3.  **Terminal 2 (Dashboard):**
-    *   **Traffic Sparkline:** Grafik aktivitas akan mulai bergerak.
-    *   **Attacks Sparkline:** Grafik serangan akan melonjak merah saat serangan dikirim.
-    *   **Alerts Log (Panel Bawah):** Akan muncul pesan peringatan real-time.
-    *   **Main Table:** Tabel utama akan terisi dengan detail request (IP asli dataset, bukan localhost).
+**Hasil yang Diharapkan:**
+1.  **Traffic Real-time:** Dashboard akan menampilkan lonjakan trafik dan serangan.
+2.  **Klasifikasi Akurat:** Serangan SQLi akan terdeteksi sebagai SQLi, XSS sebagai XSS, dll.
+3.  **Kecepatan:** Sistem harus responsif karena model hanya dimuat satu kali.
 
 ---
 
-## 3. Skenario Pengujian Spesifik
+## 2. Skenario Pengujian Spesifik (Atomic Testing)
 
-### A. Uji Serangan Spesifik (Misal: SQL Injection & XSS)
-Jika Anda ingin mempresentasikan kemampuan deteksi spesifik:
+Berguna untuk demo atau validasi serangan spesifik.
 
+### A. Uji SQL Injection (SQLi)
 ```bash
-# Di Terminal 3
-uv run python test_log_producer.py --attack-type sqli --attack-type xss --api-url http://localhost:8000 --delay 0.5
+uv run python tools/test_sample.py "GET /login.php?user=admin' OR '1'='1"
 ```
-Ini akan mengirimkan campuran trafik normal, SQL Injection, dan XSS saja.
+*Expected Result:* 🔴 ATTACK (SQLI)
 
-### B. Atomic Testing (Uji Manual Satu per Satu)
-Sangat berguna untuk demo langsung. Anda bisa mengetik serangan sendiri.
-
+### B. Uji Cross-Site Scripting (XSS)
 ```bash
-# Di Terminal 3
-uv run python tools/test_sample.py --interactive
+uv run python tools/test_sample.py "GET /search?q=<script>alert(1)</script>"
 ```
-*   Lalu ketik: `GET /login.php?user=admin' OR 1=1` (Tekan Enter)
-*   Lihat hasilnya di layar, dan juga lihat Dashboard (Terminal 2) bereaksi.
+*Expected Result:* 🔴 ATTACK (XSS)
+
+### C. Uji Directory Traversal / LFI
+```bash
+uv run python tools/test_sample.py "GET /index.php?page=../../../../etc/passwd"
+```
+*Expected Result:* 🔴 ATTACK (DIRECTORY_TRAVERSAL) atau (LFI)
+
+### D. Uji Normal Traffic
+```bash
+uv run python tools/test_sample.py "GET /wp-content/themes/style.css"
+```
+*Expected Result:* 🟢 SAFE (NORMAL)
 
 ---
 
-## 4. Pelatihan Ulang Model (Opsional)
+## 3. Pelatihan Ulang Model (Opsional)
 
-Jika Anda ingin memperbarui model dengan data baru:
+Jika Anda ingin melatih ulang model dengan data baru atau parameter baru.
 
-1.  **Siapkan Dataset:** Pastikan file CSV ada di `data/raw/Modsec-WP.csv`.
+1.  **Dataset:** Pastikan `data/raw/Modsec-WP.csv` tersedia.
 2.  **Jalankan Training:**
     ```bash
-    uv run python training/train_tensorflow_working.py --epochs 10 --batch-size 64
+    uv run python training/train_tensorflow_working.py --input data/raw/Modsec-WP.csv --epochs 20
     ```
-3.  **Verifikasi Output:** Pastikan file baru terbentuk di folder `results/`:
-    *   `final_model.keras` (atau `best_model.keras`)
-    *   `tokenizer.pkl`
-    *   `label_encoder.pkl`
-4.  **Restart Sistem:** Matikan dan nyalakan kembali `tools/api_log_producer.py` untuk memuat model baru.
+    *Script ini akan otomatis menyeimbangkan dataset (oversampling/undersampling) dan melatih model Character-Level.*
 
-## 🐛 Pemecahan Masalah Umum
+3.  **Restart Sistem:** Matikan dan nyalakan kembali `tools/api_log_producer.py` untuk memuat model baru.
 
-*   **Error "Address already in use":**
-    *   Port 8000 (HTTP) atau 5555 (ZMQ) sedang dipakai. Matikan proses python lain (`killall python` jika perlu).
-*   **Dashboard tidak menampilkan "SEMANTIC":**
-    *   Pastikan Anda menjalankan dashboard dengan flag `--semantic`.
-*   **IP Address selalu 127.0.0.1 di Dashboard:**
-    *   Pastikan Anda menggunakan versi terbaru `test_log_producer.py` dan `api_log_producer.py` yang mendukung metadata forwarding.
-    *   Restart `api_log_producer.py`.
+## 📂 Lokasi Preprocessing & Logika
+
+Jika Anda perlu memodifikasi logika:
+
+*   **Preprocessing (Training):** `training/train_tensorflow_working.py` (fungsi `preprocess_text` dan `prepare_data`).
+*   **Preprocessing (Inference):** `detectors/tensorflow_semantic_inference.py` (metode `_preprocess_text`).
+*   **Model Architecture:** `training/train_tensorflow_working.py` (fungsi `create_model`).

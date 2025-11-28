@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-WORKING TensorFlow LSTM Semantic Attack Classifier
+WORKING TensorFlow Subword (BPE) Semantic Attack Classifier
 
-Minimal, robust implementation that guarantees to work.
-Fixed all known issues and simplified for stability.
+Uses Byte-Pair Encoding (BPE) with Engineered Feature Flags for robust detection.
 """
 
 import argparse
@@ -16,10 +15,9 @@ from pathlib import Path
 
 # TensorFlow imports
 import tensorflow as tf
-from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout, Bidirectional
+from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout, Bidirectional, Conv1D, MaxPooling1D
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 
@@ -29,18 +27,23 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 
+# Tokenizers (Hugging Face)
+from tokenizers import ByteLevelBPETokenizer
+from tokenizers.processors import BertProcessing
+
 # Configuration
-VOCAB_SIZE = 10000
+VOCAB_SIZE = 10_000
 EMBEDDING_DIM = 64
-HIDDEN_DIM = 64
-OUTPUT_DIM = 8
-DROPOUT = 0.4
-LEARNING_RATE = 0.001
-EPOCHS = 20
-BATCH_SIZE = 32
+HIDDEN_DIM = 256
+DROPOUT = 0.25
+LEARNING_RATE = 0.0001
+EPOCHS = 5
+BATCH_SIZE = 64
+MAX_SEQ_LENGTH = 384 # Increased to 500
 
 # Classes
-CLASSES = ['normal', 'sqli', 'bruteforce', 'lfi', 'xss', 'rce', 'directory_traversal', 'command_injection']
+CLASSES = ['normal', 'sqli', 'bruteforce', 'lfi', 'xss', 'rce', 'directory_traversal', 'command_injection', 'rfi']
+OUTPUT_DIM = len(CLASSES)
 
 def setup_tensorflow():
     print("🔧 Setting up TensorFlow...")
@@ -59,291 +62,204 @@ def setup_tensorflow():
         return False
 
 def preprocess_text(text):
-    """Add spaces around special characters so they are tokenized."""
+    """Basic Preprocessing (without Feature Injection)."""
     if not isinstance(text, str):
         return ""
     
-    # 1. URL Decode first
+    # 1. URL Decode
     try:
         text = urllib.parse.unquote(text)
     except Exception:
         pass
         
-    # 2. Lowercase
-    text = text.lower()
+    # 2. Lowercase and strip whitespace
+    text = text.lower().strip()
+            
+    return text
+
+def balance_dataset(df, classes, target_count=5000, min_count=1000):
+    print("\n⚖️  Balancing TRAINING dataset...")
+    df['label'] = df['label'].astype(str).str.lower().str.strip()
     
-    # 3. Space out special characters
-    # Added ' to the list
-    special_chars = '!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\''
-    for char in special_chars:
-        text = text.replace(char, f' {char} ')
-        
-    return " ".join(text.split())
+    balanced_dfs = []
+    for label in classes:
+        class_df = df[df['label'] == label]
+        count = len(class_df)
+        if count == 0: continue
+            
+        if count > target_count:
+            balanced_dfs.append(class_df.sample(target_count, random_state=42))
+        elif count < min_count:
+            balanced_dfs.append(class_df.sample(min_count, replace=True, random_state=42))
+        else:
+            balanced_dfs.append(class_df)
+            
+    return pd.concat(balanced_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
 
-def prepare_data(df):
-    print("📊 Preparing data...")
+def prepare_data_splits(df, initial_classes, initial_output_dim):
+    print("📊 Preparing data splits...")
+    
+    current_classes = list(initial_classes)
+    current_output_dim = initial_output_dim
+    
+    df['label'] = df['label'].astype(str).str.lower().str.strip()
+    df.loc[df['label'] == 'path traversal', 'label'] = 'directory_traversal'
+    df = df[df['label'].isin(current_classes)]
+    
+    if 'command_injection' in df['label'].unique() and len(df[df['label'] == 'command_injection']) == 0:
+        current_classes = [cls for cls in current_classes if cls != 'command_injection']
+        current_output_dim = len(current_classes)
+        print(f"⚠️ Removed 'command_injection'. New CLASSES: {current_classes}")
 
-    # Simple text preparation
-    texts = []
-    labels = []
+    print("   Constructing text features...")
+    df['combined_text'] = (
+                df['request_line_url'].fillna('') + " " +
+                df['action_message'].fillna('') + " " +
+                df['request_body'].fillna('')    )
+    
+    print("   Preprocessing texts (without feature injection)...")
+    df['clean_text'] = df['combined_text'].apply(preprocess_text)
+    
+    print("\n   Class distribution before splitting:")
+    print(df['label'].value_counts())
 
-    for idx, row in df.iterrows():
-        if idx % 1000 == 0:
-            print(f"  Processed {idx} rows")
+    print("   Splitting dataset (80/20)...")
+    min_samples = df['label'].value_counts()
+    eligible = min_samples[min_samples >= 2].index.tolist()
+    df = df[df['label'].isin(eligible)]
+    
+    temp_le = LabelEncoder()
+    temp_y = temp_le.fit_transform(df['label'])
 
-        try:
-            # Combine basic text fields
-            text_parts = []
+    train_df, test_df = train_test_split(df, test_size=0.2, stratify=temp_y, random_state=42)
+    
+    train_df_balanced = balance_dataset(train_df, current_classes, target_count=10000, min_count=2000)
+    print(f"   Balanced Train size: {len(train_df_balanced)}")
+    
+    return train_df_balanced, test_df, current_classes, current_output_dim
 
-            # Essential fields
-            if 'request_line_method' in row and pd.notna(row['request_line_method']):
-                text_parts.append(str(row['request_line_method']))
-            if 'request_line_url' in row and pd.notna(row['request_line_url']):
-                text_parts.append(str(row['request_line_url']))
-            if 'request_useragent' in row and pd.notna(row['request_useragent']):
-                text_parts.append(str(row['request_useragent']))
-            if 'action_message' in row and pd.notna(row['action_message']):
-                text_parts.append(str(row['action_message']))
-
-            combined_text = ' '.join(text_parts)
-
-            if combined_text.strip():
-                # Preprocess to keep special chars
-                cleaned_text = preprocess_text(combined_text)
-                texts.append(cleaned_text)
-
-                # Simple label mapping
-                label_str = str(row.get('label', 'normal')).lower()
-                if label_str in ['attack', 'malicious', 'blocked']:
-                    label = 1  # SQLi
-                elif 'sqli' in label_str or 'union' in label_str or 'select' in label_str:
-                    label = 1  # SQLi
-                elif 'xss' in label_str or 'script' in label_str:
-                    label = 4  # XSS
-                elif 'exec' in label_str or 'shell' in label_str:
-                    label = 5  # RCE
-                elif 'file' in label_str or 'include' in label_str:
-                    label = 3  # LFI
-                elif 'directory' in label_str or 'traversal' in label_str:
-                    label = 6  # Directory Traversal
-                elif 'command' in label_str:
-                    label = 7  # Command Injection
-                else:
-                    label = 0  # Normal
-
-                labels.append(label)
-
-        except Exception:
-            continue
-
-    print(f"✅ Data prepared: {len(texts)} samples")
-    return texts, labels
-
-def create_model(vocab_size, max_seq_length, num_classes):
-    print("🏗️  Building LSTM model...")
-
+def create_model(vocab_size, max_seq_length, num_classes, learning_rate):
+    print("🏗️  Building Subword LSTM model...")
     model = Sequential([
         Embedding(vocab_size, output_dim=EMBEDDING_DIM, input_length=max_seq_length),
+        Conv1D(filters=64, kernel_size=5, padding='same', activation='relu'),
+        MaxPooling1D(pool_size=2),
         Bidirectional(LSTM(HIDDEN_DIM, return_sequences=False, dropout=DROPOUT)),
         Dense(64, activation='relu'),
         Dropout(DROPOUT),
         Dense(num_classes, activation='softmax')
     ])
-
-    model.compile(
-        optimizer='adam',
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-
-    print("✅ Model created and compiled")
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
     return model
 
-def train_model(model, texts, labels, vocab_size, max_seq_length, epochs, batch_size, output_dir):
-    print("🚀 Starting training...")
-
-    # Encode labels
-    # Labels are already integers matching CLASSES indices, so we don't need fit_transform
-    # which might shift indices if some classes are missing
-    y_encoded = np.array(labels)
+def train_tokenizer(texts, vocab_size):
+    print("   Training BPE Tokenizer...")
+    with open("temp_corpus.txt", "w") as f:
+        for text in texts:
+            f.write(str(text) + "\n")
+            
+    tokenizer = ByteLevelBPETokenizer()
+    # No custom flags in special tokens after removing feature injection
+    special_tokens = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"] 
     
-    # Create label encoder for artifacts (fitting on all classes to ensure consistency)
+    tokenizer.train(files=["temp_corpus.txt"], vocab_size=vocab_size, min_frequency=2, special_tokens=special_tokens)
+    
+    os.remove("temp_corpus.txt")
+    return tokenizer
+
+def encode_texts(tokenizer, texts, max_len):
+    encodings = tokenizer.encode_batch(texts.tolist())
+    sequences = [e.ids for e in encodings]
+    return pad_sequences(sequences, maxlen=max_len, padding='post', truncating='post')
+
+def evaluate_model(model, tokenizer, label_encoder, X_test, y_test, classes):
+    print("📊 Evaluating model on Real-World Test Set...")
+    loss, accuracy = model.evaluate(X_test, y_test, verbose=0)
+    print(f"Test Loss: {loss:.4f}")
+    print(f"Test Accuracy: {accuracy:.4f}")
+
+    y_pred = model.predict(X_test, verbose=0)
+    y_pred_classes = np.argmax(y_pred, axis=1)
+    y_test_int = np.argmax(y_test, axis=1)
+
+    print("\nClassification Report:")
+    report = classification_report(
+        y_test_int, 
+        y_pred_classes, 
+        target_names=classes,
+        zero_division=0, 
+        labels=list(range(len(classes)))
+    )
+    print(report)
+
+def train_model(model, train_df, test_df, vocab_size, max_seq_length, epochs, batch_size, output_dir, classes):
+    print("🚀 Starting training pipeline...")
+
     label_encoder = LabelEncoder()
-    label_encoder.fit(list(range(len(CLASSES))))
+    label_encoder.fit(classes)
     
-    y_categorical = to_categorical(y_encoded, num_classes=len(CLASSES))
+    y_train = to_categorical(label_encoder.transform(train_df['label']), num_classes=len(classes))
+    y_test = to_categorical(label_encoder.transform(test_df['label']), num_classes=len(classes))
 
-    # Tokenize texts
-    # Use empty filters to keep special characters (which we spaced out in preprocessing)
-    tokenizer = Tokenizer(num_words=vocab_size, oov_token='<OOV>', filters='')
-    tokenizer.fit_on_texts(texts)
+    tokenizer = train_tokenizer(train_df['clean_text'], vocab_size)
+    
+    X_train = encode_texts(tokenizer, train_df['clean_text'], max_seq_length)
+    X_test = encode_texts(tokenizer, test_df['clean_text'], max_seq_length)
 
-    # Convert to sequences
-    sequences = tokenizer.texts_to_sequences(texts)
-    X = pad_sequences(sequences, maxlen=max_seq_length, padding='post', truncating='post')
-
-    # Create proper train-test split (80% train, 20% test)
-    from sklearn.model_selection import train_test_split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_categorical,
-        test_size=0.2,
-        random_state=42,
-        stratify=y_encoded  # Ensure balanced class distribution
-    )
-
-    print(f"✅ Train-test split created: {len(X_train)} training, {len(X_test)} testing samples")
-
-    # Calculate class weights to handle imbalance
-    # y_train is one-hot, we need integers for compute_class_weight
     y_train_int = np.argmax(y_train, axis=1)
-    unique_classes = np.unique(y_train_int)
-    
-    weights = compute_class_weight(
-        class_weight='balanced',
-        classes=unique_classes,
-        y=y_train_int
-    )
-    class_weight_dict = dict(zip(unique_classes, weights))
-    print(f"⚖️  Class weights computed: {class_weight_dict}")
+    weights = compute_class_weight('balanced', classes=np.unique(y_train_int), y=y_train_int)
+    class_weight_dict = dict(zip(np.unique(y_train_int), weights))
+    print(f"⚖️  Class weights: {class_weight_dict}")
 
-    # Setup callbacks
     os.makedirs(output_dir, exist_ok=True)
     callbacks = [
-        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=1),
-        ModelCheckpoint(
-            filepath=os.path.join(output_dir, 'best_model.keras'),
-            monitor='val_accuracy',
-            save_best_only=True,
-            verbose=1
-        )
+        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+        ModelCheckpoint(os.path.join(output_dir, 'best_model.keras'), monitor='val_accuracy', save_best_only=True)
     ]
 
-    # Train model
     history = model.fit(
         X_train, y_train,
         epochs=epochs,
         batch_size=batch_size,
-        validation_split=0.2,  # Now this is 20% of training data for validation
+        validation_data=(X_test, y_test), 
         callbacks=callbacks,
         class_weight=class_weight_dict,
         verbose=1
     )
 
-    # Save model and artifacts (using native Keras format)
-    model_path = os.path.join(output_dir, 'final_model.keras')
-    model.save(model_path)
-    print(f"✅ Model saved: {model_path}")
-
-    # Save tokenizer
-    tokenizer_path = os.path.join(output_dir, 'tokenizer.pkl')
+    model.save(os.path.join(output_dir, 'final_model.keras'))
+    tokenizer.save_model(output_dir)
+    
     import pickle
-    with open(tokenizer_path, 'wb') as f:
-        pickle.dump(tokenizer, f)
-    print(f"✅ Tokenizer saved: {tokenizer_path}")
-
-    # Save label encoder
-    encoder_path = os.path.join(output_dir, 'label_encoder.pkl')
-    with open(encoder_path, 'wb') as f:
+    with open(os.path.join(output_dir, 'label_encoder.pkl'), 'wb') as f:
         pickle.dump(label_encoder, f)
-    print(f"✅ Label encoder saved: {encoder_path}")
 
-    print("🎉 Training completed!")
-    return model, tokenizer, label_encoder, history, X_test, y_test
-
-def evaluate_model(model, tokenizer, label_encoder, X_test, y_test, max_seq_length=100):
-    print("📊 Evaluating model...")
-
-    # X_test is already tokenized and padded from train_model
-    X_test_padded = X_test
-
-    # Evaluate
-    loss, accuracy = model.evaluate(X_test_padded, y_test, verbose=0)
-    print(f"Test Loss: {loss:.4f}")
-    print(f"Test Accuracy: {accuracy:.4f}")
-
-    # Generate predictions
-    y_pred = model.predict(X_test_padded, verbose=0)
-    y_pred_classes = np.argmax(y_pred, axis=1)
-
-    # Convert y_test from one-hot to integer labels
-    y_test_int = np.argmax(y_test, axis=1)
-
-    # Classification report
-    print("\nClassification Report:")
-    # Use labels=range(len(CLASSES)) to force report to include all classes and match target_names
-    report = classification_report(y_test_int, y_pred_classes, target_names=CLASSES, zero_division=0, labels=list(range(len(CLASSES))))
-    print(report)
-
-    return {
-        'test_loss': loss,
-        'test_accuracy': accuracy,
-        'classification_report': report
-    }
+    return model, tokenizer, label_encoder, X_test, y_test
 
 def main():
-    parser = argparse.ArgumentParser(description="Working TensorFlow LSTM Semantic Attack Classifier")
-    parser.add_argument('--input', type=str, default='data/raw/Modsec-WP.csv', help='Input CSV file')
-    parser.add_argument('--epochs', type=int, default=EPOCHS, help='Training epochs')
-    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE, help='Batch size')
-    parser.add_argument('--output-dir', type=str, default='results', help='Output directory')
-    parser.add_argument('--vocab-size', type=int, default=VOCAB_SIZE, help='Vocabulary size')
-    parser.add_argument('--max-seq-length', type=int, default=100, help='Maximum sequence length')
-    parser.add_argument('--learning-rate', type=float, default=LEARNING_RATE, help='Learning rate')
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', type=str, default='data/raw/Modsec-WP.csv')
+    parser.add_argument('--epochs', type=int, default=EPOCHS)
+    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
+    parser.add_argument('--output-dir', type=str, default='results')
+    
     args = parser.parse_args()
-
-    print("="*80)
-    print("🚀 WORKING TENSORFLOW LSTM SEMANTIC ATTACK CLASSIFIER")
-    print("="*80)
-
-    # Setup TensorFlow
     setup_tensorflow()
-
-    # Check input file
-    if not os.path.exists(args.input):
-        print(f"❌ Error: Input file not found: {args.input}")
-        return 1
-
-    # Load data
-    try:
-        df = pd.read_csv(args.input)
-        print(f"✅ Dataset loaded: {df.shape}")
-    except Exception as e:
-        print(f"❌ Error loading dataset: {e}")
-        return 1
-
-    # Prepare data
-    texts, labels = prepare_data(df)
-    if len(texts) == 0:
-        print("❌ Error: No valid text data prepared")
-        return 1
-
-    # Create model
-    model = create_model(args.vocab_size, args.max_seq_length, len(CLASSES))
-
-    # Train model
-    model, tokenizer, label_encoder, history, X_test, y_test = train_model(
-        model, texts, labels,
-        vocab_size=args.vocab_size,
-        max_seq_length=args.max_seq_length,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        output_dir=args.output_dir
-    )
-
-    # Evaluate model on held-out test set
-    print("📊 Evaluating on held-out test set...")
-    test_results = evaluate_model(model, tokenizer, label_encoder,
-                                 X_test,
-                                 y_test,
-                                 max_seq_length=args.max_seq_length)
-
-    print("\n" + "="*80)
-    print(f"🎯 TRAINING COMPLETED SUCCESSFULLY!")
-    print(f"✅ Test Accuracy: {test_results['test_accuracy']:.4f} ({test_results['test_accuracy']*100:.2f}%)")
-    print(f"✅ Test Loss: {test_results['test_loss']:.4f}")
-    print(f"📁 Results saved to: {args.output_dir}")
-
+    
+    if not os.path.exists(args.input): return 1
+    df = pd.read_csv(args.input, low_memory=False)
+    
+    global CLASSES
+    global OUTPUT_DIM
+    
+    train_df, test_df, CLASSES, OUTPUT_DIM = prepare_data_splits(df, CLASSES, OUTPUT_DIM)
+    model = create_model(VOCAB_SIZE, MAX_SEQ_LENGTH, len(CLASSES), LEARNING_RATE)
+    
+    model, tokenizer, label_encoder, X_test, y_test = train_model(model, train_df, test_df, VOCAB_SIZE, MAX_SEQ_LENGTH, args.epochs, args.batch_size, args.output_dir, CLASSES)
+    
+    evaluate_model(model, tokenizer, label_encoder, X_test, y_test, CLASSES)
+    
     return 0
 
 if __name__ == "__main__":

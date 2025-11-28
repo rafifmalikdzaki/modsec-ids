@@ -19,6 +19,7 @@ dependencies = [
   "torch",
   "torchvision",
   "tensorflow>=2.15.0",
+  "tokenizers>=0.22.1",
 ]
 
 [tool.uv.sources]
