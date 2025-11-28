@@ -16,8 +16,8 @@ class TensorFlowSemanticInference:
         self.model = None
         self.tokenizer = None
         self.label_encoder = None
-        self.max_seq_length = 100  # Must match training
-        self.classes = ['normal', 'sqli', 'bruteforce', 'lfi', 'xss', 'rce', 'directory_traversal', 'command_injection']
+        self.max_seq_length = 1000  # Must match training (Character Level)
+        self.classes = ['normal', 'sqli', 'bruteforce', 'lfi', 'xss', 'rce', 'directory_traversal', 'command_injection', 'rfi']
         
         self._load_artifacts()
 
