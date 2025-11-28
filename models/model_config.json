@@ -1,0 +1,26 @@
+{
+    "text_features": [
+        "request_useragent",
+        "request_line_url",
+        "full_message_line"
+    ],
+    "categorical_features": [
+        "request_line_method",
+        "action",
+        "message_type"
+    ],
+    "numerical_features": [
+        "response_status"
+    ],
+    "cat_features_config": {
+        "request_line_method": 3,
+        "action": 2,
+        "message_type": 3
+    },
+    "num_classes": 8,
+    "vocab_size": 10000,
+    "max_len": 100,
+    "embed_dim": 128,
+    "lstm_hidden": 64,
+    "cat_embed_dim": 10
+}

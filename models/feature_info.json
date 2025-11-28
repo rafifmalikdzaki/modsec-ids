@@ -1,0 +1,25 @@
+{
+    "text_features": [
+        "request_useragent",
+        "request_line_url",
+        "full_message_line"
+    ],
+    "categorical_features": [
+        "request_line_method",
+        "action",
+        "message_type"
+    ],
+    "numerical_features": [
+        "response_status"
+    ],
+    "label_classes": [
+        "bruteforce",
+        "lfi",
+        "normal",
+        "path traversal",
+        "rce",
+        "rfi",
+        "sqli",
+        "xss"
+    ]
+}
