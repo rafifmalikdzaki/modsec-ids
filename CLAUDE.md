@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a ModSecurity Intrusion Detection System (IDS) that performs real-time web attack detection using machine learning. The system consists of:
 
-- **ML-based Attack Detection**: PyTorch neural network classifier (`security_model.py`) that analyzes HTTP request features
+- **ML-based Attack Detection**: Semantic LSTM (`detectors.tensorflow_semantic_inference`) and PyTorch classifiers (`detectors.security_model`)
 - **Real-time Dashboard**: Textual-based TUI (`idsdashboard.py`) for monitoring attacks live
 - **Log Producer**: ZeroMQ-based log streaming (`logprod.py`) that processes web server logs
-- **Data Pipeline**: Log transformation utilities (`pipeline/transform.py`) for preprocessing
+- **Training Pipeline**: Scripts in `training/` for model development
 
 ## Development Commands
 
@@ -24,180 +24,104 @@ source .venv/bin/activate
 
 ### Running the System
 
-The system requires two separate processes running simultaneously:
+The system requires three separate processes running simultaneously:
 
-1. **Start the log producer** (Terminal 1):
-```bash
-python logprod.py
-```
-- Reads from `data/raw/access.txt`
-- Publishes parsed log data via ZeroMQ on port 5555
-- Waits for log file to exist if not found
+1.  **Start the Inference Engine (API Producer)** (Terminal 1):
+    ```bash
+    uv run python tools/api_log_producer.py
+    ```
+    *   Loads model once, serves predictions via HTTP.
 
-2. **Start the dashboard** (Terminal 2):
-```bash
-python idsdashboard.py
-```
-- Subscribes to ZeroMQ on port 5555
-- Performs real-time inference using the attack classifier
-- Displays traffic and attack statistics in a TUI interface
+2.  **Start the Dashboard** (Terminal 2):
+    ```bash
+    uv run python idsdashboard.py --semantic
+    ```
+
+3.  **Start Data Feed** (Terminal 3):
+    ```bash
+    # For testing/demo (simulated traffic)
+    uv run python test_log_producer.py --full-test --api-url http://localhost:8000 --delay 0.1
+
+    # For real log monitoring
+    uv run python logprod.py --input data/raw/access.txt --continuous --api-url http://localhost:8000
+    ```
 
 ### Model Training and Development
 
-3. **Train different model variants**:
+3. **Train the Semantic LSTM Model (Primary)**:
 ```bash
-# Simple FFNN classifier
-python train_simple.py
-
-# Enhanced LSTM classifier
-python train_enhanced_ids.py
-
-# LSTM semantic classifier with multi-class attack types
-python train_semantic_model.py [--input data/dataset.csv] [--epochs 10] [--batch-size 32]
+uv run python training/train_tensorflow_working.py --input data/raw/Modsec-WP.csv --epochs 20
 ```
 
 4. **Data processing and utilities**:
 ```bash
 # Transform raw logs to dataset format
-python pipeline/transform.py --input data/raw/access.txt --output pipeline/modsec_wp_dataset.csv
-
-# Streaming mode (read from stdin, write to stdout)
-cat access.txt | python pipeline/transform.py --stream
-
-# Convert Excel data to CSV
-python convert_excel_to_csv.py
+uv run python pipeline/transform.py --input data/raw/access.txt --output pipeline/modsec_wp_dataset.csv
 
 # Create synthetic attack samples for testing
-python create_attack_samples.py
+uv run python tools/create_attack_samples.py
 ```
 
 ### Testing
 ```bash
 # Run main application entry point
-python main.py
+uv run python main.py
 
-# Test log producer independently
-python test_log_producer.py
+# Atomic testing
+uv run python tools/test_sample.py --interactive
 ```
 
 ### Model Selection Priority
 The system automatically selects models in this priority order:
-1. **LSTM Semantic Model** (`enhanced_security_model.LSTMMultiClassSemanticAttackClassifier`) - 8-class classifier
-2. **Enhanced LSTM Model** (`enhanced_security_model.EnhancedAttackClassifier`) - Binary classifier
-3. **Simple FFNN Model** (`security_model.AttackClassifier`) - Basic 10-feature classifier
+1. **Semantic LSTM Model** (TensorFlow) - 8-class semantic analysis of payloads.
+2. **Multi-class LSTM Model** (PyTorch) - 8-class classification based on features.
+3. **Binary Classifier** (PyTorch) - Simple safe/attack classification.
 
 ## Architecture
 
+### Directory Structure
+- `detectors/`: Core detection logic (`tensorflow_semantic_inference.py`, `security_model.py`)
+- `training/`: Model training scripts (`train_tensorflow_working.py`)
+- `tools/`: Utility scripts (`create_attack_samples.py`, `api_log_producer.py`)
+- `idsdashboard.py`: TUI Dashboard
+- `logprod.py`: Real-time log producer
+- `test_log_producer.py`: Test data generator
+
 ### Data Flow
-1. **Log Producer** (`logprod.py`) → ZeroMQ Publisher
-2. **Dashboard** (`idsdashboard.py`) → ZeroMQ Subscriber + ML Inference + TUI
-3. **Feature Extraction** → Multiple model types (Simple FFNN, Enhanced LSTM, LSTM Semantic)
-4. **Neural Networks** → Binary (Safe/Attack) and Multi-class (8 attack types) classifiers
-
-### Model Architecture Hierarchy
-
-The system supports three progressively sophisticated model types:
-
-#### 1. Simple FFNN Classifier (`security_model.py`)
-- **Features**: 10 numerical features extracted from HTTP requests
-- **Architecture**: Input(10) → Hidden(16, ReLU) → Output(2, softmax)
-- **Output**: Binary classification (Safe/Attack probabilities)
-
-#### 2. Enhanced LSTM Classifier (`enhanced_security_model.py`)
-- **Features**: Sequential analysis with attention mechanism
-- **Architecture**: LSTM layers with attention over request sequences
-- **Output**: Binary classification with confidence scores
-
-#### 3. LSTM Semantic Classifier (`enhanced_security_model.py`)
-- **Features**: Full semantic understanding of HTTP headers, payloads, and responses
-- **Architecture**: Multi-layer LSTM with embedding and dropout
-- **Output**: 8-class classification (Normal + 7 attack types: SQLi, Brute Force, LFI, XSS, RCE, Directory Traversal, Command Injection)
-- **Classes**: `{'normal': 0, 'sqli': 1, 'bruteforce': 2, 'lfi': 3, 'xss': 4, 'rce': 5, 'directory_traversal': 6, 'command_injection': 7}`
+1. **Log Producer** (`logprod.py`) → HTTP Request → **API Producer** (`tools/api_log_producer.py`)
+2. **API Producer** (Inference) → ZeroMQ Publisher
+3. **Dashboard** (`idsdashboard.py`) → ZeroMQ Subscriber + TUI Visualization
 
 ### Key Components
 
-#### Feature Engineering (`security_model.py:FeatureExtractor`)
-Supports three extraction modes:
-- **Basic**: 10 numerical features from HTTP requests
-- **Enhanced**: Sequential features with temporal context
-- **Semantic**: Full text analysis of headers, payloads, and responses
-
-Basic features extracted:
-- Admin area indicators (`wp-admin`, `admin-ajax`)
-- Request method (POST vs others)
-- URI length (normalized)
-- Special characters (XSS indicators: `<`, `>`, `'`, `"`)
-- Attack keywords (`base64`, `exec`, `union`)
-- HTTP status codes (200 OK, 4xx/5xx errors)
-
-#### Model Training Infrastructure
-- **Simple FFNN**: `train_simple.py` - Basic binary classifier
-- **Enhanced LSTM**: `train_enhanced_ids.py` - Sequential binary classifier
-- **LSTM Semantic**: `train_semantic_model.py` - Multi-class semantic analyzer
-- **Data Preprocessing**: `data_preprocessor.py` - Shared preprocessing utilities
+#### Feature Engineering (`detectors.security_model`)
+Supports extraction of numerical features and semantic text preprocessing.
 
 #### Real-time Communication
 - **Protocol**: ZeroMQ PUB/SUB pattern
 - **Host**: localhost
 - **Port**: 5555
 - **Topic**: "logs"
-- **Message Format**: JSON with `features` (list) and `metadata` (dict)
 
 #### Dashboard UI (`idsdashboard.py`)
-- **Multi-class Support**: Handles both binary and multi-class predictions
-- **Stats row**: Total traffic counter, attack counter, sparklines
-- **Main table**: Real-time log entries with predictions and attack type labels
-- **Alerts log**: Attack-specific notifications with color coding by attack type
-- **Threading**: ZeroMQ listener runs in background thread, UI updates via message posting
+- **Thread Safety**: Dashboard handles thread-safe UI updates via Textual's `post_message` system
+- **Visuals**: Sparklines for traffic/attacks, detailed log table, alert panel.
 
 ### Data Sources
-- **Raw logs**: Expected in `data/raw/access.txt` (Apache/Nginx combined log format)
-- **Processed dataset**: `pipeline/modsec_wp_dataset.csv` with 26-field ModSecurity schema
-- **Attack patterns**: Auto-labeled based on signatures in `ATTACK_SIGNATURES`
-- **Excel data**: Convertible via `convert_excel_to_csv.py`
-- **Synthetic data**: Generated via `create_attack_samples.py` for testing
+- **Raw logs**: Expected in `data/raw/access.txt`
+- **Processed dataset**: `data/processed/`
+- **Model storage**: `models/` and `results/`
 
 ## Configuration
 
-### Model Configuration
-
-#### Simple FFNN (`security_model.py`)
-- `INPUT_DIM = 10`: Basic feature vector size
-- `HIDDEN_DIM = 16`: Hidden layer size
-- `OUTPUT_DIM = 2`: Binary classification output
-
-#### Enhanced LSTM (`enhanced_security_model.py`)
-- `LSTM_MODEL_PATH = "models/lstm_attack_classifier.pth"`
-- `PREPROCESSOR_PATH = "data/processed/modsec_processed_preprocessor.pkl"`
-
-#### LSTM Semantic (`enhanced_security_model.py`)
-- `LSTM_SEMANTIC_MODEL_PATH = "models/lstm_semantic_classifier.pth"`
-- `SEMANTIC_PREPROCESSOR_PATH = "data/processed/lstm_semantic_preprocessor.pkl"`
-- `VOCAB_SIZE = 10000`: Token vocabulary size
-- `EMBEDDING_DIM = 128`: Word embedding dimensions
-- `HIDDEN_DIM = 256`: LSTM hidden state size
-- `OUTPUT_DIM = 8`: Multi-class output (7 attack types + normal)
-- `MAX_SEQ_LENGTH = 500`: Maximum sequence length for semantic analysis
-
-### ZeroMQ Configuration
-- Host: `localhost` (hardcoded in both producer and dashboard)
-- Port: `5555` (configurable via `ZMQ_PORT` constants)
-- Topic: `"logs"` for message filtering
-
 ### File Locations
 - **Log source**: `data/raw/access.txt`
-- **Dataset output**: `pipeline/modsec_wp_dataset.csv`
-- **Model storage**: `models/` directory for trained classifiers
-- **Preprocessors**: `data/processed/` for fitted preprocessing objects
-- **Virtual environment**: `.venv/`
+- **Model storage**: `results/final_model.keras` (TensorFlow), `models/*.pth` (PyTorch)
+- **Preprocessors**: `results/tokenizer.pkl`, `results/label_encoder.pkl`
 
 ## Development Notes
 
-- **Dependency Management**: Uses `uv` for fast dependency resolution (configured in `pyproject.toml`)
-- **Python Version**: Requires Python 3.12+ (specified in `.python-version` and `pyproject.toml`)
-- **GPU Acceleration**: PyTorch uses CUDA 128 binaries for GPU acceleration where available
-- **Thread Safety**: Dashboard handles thread-safe UI updates via Textual's `post_message` system
-- **Error Handling**: Log parsing is tolerant of encoding errors and malformed lines
-- **Performance**: Producer includes 0.2s delay between messages for dashboard readability
-- **Model Fallback**: Automatic model selection with graceful degradation from semantic → enhanced → simple models
-- **Attack Classification**: Supports both binary detection and multi-class attack type identification with color-coded visualization
+- **Dependency Management**: Uses `uv` (configured in `pyproject.toml`)
+- **Python Version**: Requires Python 3.12+
+- **GPU Acceleration**: TensorFlow/PyTorch use GPU where available
+- **Error Handling**: Robust error handling in producers to prevent crash on malformed logs

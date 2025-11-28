@@ -6,6 +6,8 @@ import json
 import argparse
 import glob
 import numpy as np
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 # Import the new TensorFlow inference engine
@@ -40,52 +42,92 @@ def sanitize_for_json(obj):
     return obj
 
 class LogProducer:
-    def __init__(self, port=ZMQ_PORT):
+    def __init__(self, port=ZMQ_PORT, api_url=None):
         self.port = port
+        self.api_url = api_url
         self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.PUB)
-        try:
-            self.socket.bind(f"tcp://*:{self.port}")
-            print(f"🚀 Producer started on port {self.port}")
-        except zmq.error.ZMQError:
-            print(f"❌ Error: Port {self.port} is in use. Is the producer already running?")
-            sys.exit(1)
+        
+        # Only bind ZMQ if not using a remote API for inference
+        if not self.api_url:
+            self.socket = self.context.socket(zmq.PUB)
+            try:
+                self.socket.bind(f"tcp://*:{self.port}")
+                print(f"🚀 Producer started on port {self.port}")
+            except zmq.error.ZMQError:
+                print(f"❌ Error: Port {self.port} is in use. Is the producer already running?")
+                sys.exit(1)
+        else:
+            self.socket = None # No local ZMQ binding
 
         # Initialize Inference Engines
         self.extractor = FeatureExtractor(use_enhanced=False, use_semantic=True)
         
-        if TENSORFLOW_AVAILABLE:
+        if self.api_url:
+            print(f"🌐 Using Remote API for inference: {self.api_url}")
+            self.tf_model = None
+        elif TENSORFLOW_AVAILABLE:
             print("🧠 Initializing TensorFlow Semantic Model...")
             self.tf_model = TensorFlowSemanticInference()
         else:
             self.tf_model = None
+
+    def _call_remote_api(self, log_line, metadata=None):
+        """Call the remote API for inference."""
+        try:
+            payload = {"log": log_line}
+            if metadata:
+                payload["metadata"] = metadata
+                
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                f"{self.api_url}/analyze", 
+                data=data, 
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return result['prediction'], result['confidence'], result['probabilities']
+        except Exception as e:
+            print(f"⚠️ API Error: {e}")
+            return 'error', 0.0, {}
 
     def process_log_line(self, line):
         if not line.strip():
             return
 
         try:
-            # 1. TensorFlow Semantic Inference (Primary)
-            semantic_result = {}
-            if self.tf_model:
-                label, conf, probs = self.tf_model.predict(line.strip())
-                semantic_result = {
-                    'semantic_prediction': label,
-                    'semantic_confidence': float(conf),
-                    'semantic_probs': probs
-                }
-
-            # 2. Feature Extraction (Secondary/Metadata)
-            # We still use this to get IP, method, status, etc. for the dashboard
+            # 1. Feature Extraction (Secondary/Metadata)
+            # We perform this FIRST so we can send metadata (IP/Port) to the API
             features, metadata = self.extractor.parse_and_extract(line)
 
             if features:
+                # 2. TensorFlow Semantic Inference (Primary)
+                semantic_result = {}
+                
+                if self.api_url:
+                    # Remote Inference (Pass metadata so API uses correct IP)
+                    label, conf, probs = self._call_remote_api(line.strip(), metadata)
+                    if label != 'error':
+                        semantic_result = {
+                            'semantic_prediction': label,
+                            'semantic_confidence': float(conf),
+                            'semantic_probs': probs
+                        }
+                elif self.tf_model:
+                    # Local Inference
+                    label, conf, probs = self.tf_model.predict(line.strip())
+                    semantic_result = {
+                        'semantic_prediction': label,
+                        'semantic_confidence': float(conf),
+                        'semantic_probs': probs
+                    }
+
                 # 3. Merge Results
                 # We inject the semantic results into metadata so the dashboard can use them
                 if semantic_result:
                     metadata.update(semantic_result)
                     # Also set a top-level 'is_attack' flag for easier consumption
-                    metadata['is_attack'] = semantic_result['semantic_prediction'] != 'normal'
+                    metadata['is_attack'] = semantic_result.get('semantic_prediction', 'normal') != 'normal'
 
                 payload = {
                     'features': features,
@@ -95,9 +137,11 @@ class LogProducer:
                 # Sanitize payload for JSON serialization (fix int64 error)
                 payload = sanitize_for_json(payload)
 
-                # 4. Publish
-                self.socket.send_string("logs", flags=zmq.SNDMORE)
-                self.socket.send_json(payload)
+                # 4. Publish (Only if not using remote API, OR if we want local publishing? 
+                # Actually, if using remote API, the API publishes. So we should NOT publish here.)
+                if not self.api_url:
+                    self.socket.send_string("logs", flags=zmq.SNDMORE)
+                    self.socket.send_json(payload)
 
                 # Feedback
                 self._print_status(metadata)
@@ -160,7 +204,8 @@ class LogProducer:
                     self.process_log_line(line)
 
     def close(self):
-        self.socket.close()
+        if self.socket: # Only close if a socket was created
+            self.socket.close()
         self.context.term()
 
 def main():
@@ -168,10 +213,11 @@ def main():
     parser.add_argument('--input', type=str, default=DEFAULT_LOG_FILE, help='Input log file or pattern')
     parser.add_argument('--continuous', action='store_true', help='Monitor file in real-time (tail -f)')
     parser.add_argument('--bulk-process', action='store_true', help='Process all matching files and exit')
+    parser.add_argument('--api-url', type=str, help='URL of the API Log Producer (e.g., http://localhost:8000)')
     
     args = parser.parse_args()
     
-    producer = LogProducer()
+    producer = LogProducer(api_url=args.api_url)
 
     try:
         if args.bulk_process:

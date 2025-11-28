@@ -11,6 +11,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
+import urllib.parse
 from pathlib import Path
 
 # TensorFlow imports
@@ -26,9 +27,10 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.utils.class_weight import compute_class_weight
 
 # Configuration
-VOCAB_SIZE = 5000
+VOCAB_SIZE = 10000
 EMBEDDING_DIM = 64
 HIDDEN_DIM = 64
 OUTPUT_DIM = 8
@@ -55,6 +57,28 @@ def setup_tensorflow():
     else:
         print("ℹ️  No GPUs detected - using CPU")
         return False
+
+def preprocess_text(text):
+    """Add spaces around special characters so they are tokenized."""
+    if not isinstance(text, str):
+        return ""
+    
+    # 1. URL Decode first
+    try:
+        text = urllib.parse.unquote(text)
+    except Exception:
+        pass
+        
+    # 2. Lowercase
+    text = text.lower()
+    
+    # 3. Space out special characters
+    # Added ' to the list
+    special_chars = '!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\''
+    for char in special_chars:
+        text = text.replace(char, f' {char} ')
+        
+    return " ".join(text.split())
 
 def prepare_data(df):
     print("📊 Preparing data...")
@@ -84,7 +108,9 @@ def prepare_data(df):
             combined_text = ' '.join(text_parts)
 
             if combined_text.strip():
-                texts.append(combined_text)
+                # Preprocess to keep special chars
+                cleaned_text = preprocess_text(combined_text)
+                texts.append(cleaned_text)
 
                 # Simple label mapping
                 label_str = str(row.get('label', 'normal')).lower()
@@ -148,7 +174,8 @@ def train_model(model, texts, labels, vocab_size, max_seq_length, epochs, batch_
     y_categorical = to_categorical(y_encoded, num_classes=len(CLASSES))
 
     # Tokenize texts
-    tokenizer = Tokenizer(num_words=vocab_size, oov_token='<OOV>')
+    # Use empty filters to keep special characters (which we spaced out in preprocessing)
+    tokenizer = Tokenizer(num_words=vocab_size, oov_token='<OOV>', filters='')
     tokenizer.fit_on_texts(texts)
 
     # Convert to sequences
@@ -165,6 +192,19 @@ def train_model(model, texts, labels, vocab_size, max_seq_length, epochs, batch_
     )
 
     print(f"✅ Train-test split created: {len(X_train)} training, {len(X_test)} testing samples")
+
+    # Calculate class weights to handle imbalance
+    # y_train is one-hot, we need integers for compute_class_weight
+    y_train_int = np.argmax(y_train, axis=1)
+    unique_classes = np.unique(y_train_int)
+    
+    weights = compute_class_weight(
+        class_weight='balanced',
+        classes=unique_classes,
+        y=y_train_int
+    )
+    class_weight_dict = dict(zip(unique_classes, weights))
+    print(f"⚖️  Class weights computed: {class_weight_dict}")
 
     # Setup callbacks
     os.makedirs(output_dir, exist_ok=True)
@@ -185,6 +225,7 @@ def train_model(model, texts, labels, vocab_size, max_seq_length, epochs, batch_
         batch_size=batch_size,
         validation_split=0.2,  # Now this is 20% of training data for validation
         callbacks=callbacks,
+        class_weight=class_weight_dict,
         verbose=1
     )
 

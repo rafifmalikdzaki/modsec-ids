@@ -6,7 +6,7 @@ A machine learning-based Intrusion Detection System (IDS) that detects and class
 
 *   **Real-Time Detection**: Streams and analyzes log data instantly using ZeroMQ.
 *   **Hybrid AI Models**:
-    *   **Semantic LSTM**: Analyzes the *meaning* of payloads (SQLi, XSS, etc.) using Natural Language Processing (NLP).
+    *   **Semantic LSTM**: Analyzes the *meaning* of payloads (SQLi, XSS, etc.) using Natural Language Processing (NLP) with specialized tokenization for web attacks.
     *   **Feature-Based FFNN**: Analyzes statistical features (length, special characters, etc.).
 *   **Multi-Class Classification**: Detects 8 specific classes:
     *   `Normal` (Safe Traffic)
@@ -19,14 +19,18 @@ A machine learning-based Intrusion Detection System (IDS) that detects and class
     *   `Command Injection`
     *   `Brute Force`
 *   **Interactive Dashboard**: A terminal-based UI (TUI) for monitoring traffic, visualizing attack trends, and viewing detailed alerts.
+*   **Atomic Testing**: Tools to instantly test individual attack payloads against the model.
 
 ## 📦 Architecture
 
-The system consists of three main components:
+The system consists of these main components:
 
-1.  **Log Producer (`logprod.py`)**: Reads web server logs (e.g., Apache/Nginx), performs initial feature extraction, and publishes data via ZeroMQ. It also runs the TensorFlow Semantic Model for deep payload analysis.
-2.  **Dashboard (`idsdashboard.py`)**: Subscribes to the log stream, aggregates statistics, and displays real-time alerts in a rich TUI. It can also run a secondary PyTorch model for verification.
-3.  **Training Pipeline**: A suite of scripts to preprocess data and train the models.
+1.  **API Producer (`tools/api_log_producer.py`)**: The core inference engine. It loads the heavy AI model *once* and provides an HTTP API for analysis. It publishes results to the Dashboard.
+2.  **Dashboard (`idsdashboard.py`)**: Subscribes to the inference stream, aggregates statistics, and displays real-time alerts in a rich TUI.
+3.  **Log Producers**: Clients that read logs and send them to the API Producer.
+    *   `logprod.py`: Reads real log files (e.g., `access.txt`).
+    *   `test_log_producer.py`: Generates synthetic test traffic.
+4.  **Training Pipeline**: Scripts in `training/` to preprocess data and train the models with improved special character handling.
 
 ## 🛠️ Installation & Setup
 
@@ -48,17 +52,12 @@ The system consists of three main components:
 
 ## 🚦 Running the System
 
-To run the full system, you need two terminal windows:
+To run the full system efficiently, use **three terminal windows**:
 
-### Terminal 1: Start the Log Producer
-This script simulates a live web server log stream.
+### Terminal 1: Start the Inference Engine
+This loads the model and listens for requests.
 ```bash
-# Run with comprehensive test data simulation
-uv run python test_log_producer.py --full-test --delay 0.2
-```
-*Alternatively, to monitor a real file:*
-```bash
-uv run python logprod.py --input data/raw/access.txt --continuous
+uv run python tools/api_log_producer.py
 ```
 
 ### Terminal 2: Start the Dashboard
@@ -66,37 +65,49 @@ This launches the monitoring interface.
 ```bash
 uv run python idsdashboard.py --semantic
 ```
-*   `--semantic`: Enables the advanced LSTM-based text analysis display.
-*   `--multiclass`: Uses the statistical feature-based classifier.
+
+### Terminal 3: Feed Data (Logs or Tests)
+Send traffic to the engine.
+
+*   **Option A: Monitor Real Logs**
+    ```bash
+    uv run python logprod.py --input data/raw/access.txt --continuous --api-url http://localhost:8000
+    ```
+
+*   **Option B: Run Full Test Suite**
+    ```bash
+    uv run python test_log_producer.py --full-test --api-url http://localhost:8000 --delay 0.1
+    ```
+
+*   **Option C: Atomic Testing (Single Attacks)**
+    ```bash
+    uv run python tools/test_sample.py "GET /login.php?user=' OR 1=1"
+    ```
+    *(See `ATOMIC_TESTING_GUIDE.md` for more)*
 
 ## 🧠 Model Training
 
 If you need to retrain the models on new data:
 
-### 1. Semantic LSTM Model (TensorFlow)
+### Semantic LSTM Model (TensorFlow)
 The most accurate model for payload analysis.
 ```bash
 # Train the semantic model
-uv run python train_tensorflow_working.py --input data/raw/Modsec-WP.csv --epochs 20
-```
-
-### 2. Feature-Based Model (PyTorch)
-A lightweight backup model.
-```bash
-# Preprocess data and train
-uv run python train_enhanced_ids.py --preprocess --train
+uv run python training/train_tensorflow_working.py --input data/raw/Modsec-WP.csv --epochs 20
 ```
 
 ## 📂 Project Structure
 
-*   `idsdashboard.py`: Main dashboard application (TUI).
-*   `logprod.py`: Log streaming service (Real-time producer).
-*   `test_log_producer.py`: Test tool for generating synthetic/replay traffic.
-*   `train_tensorflow_working.py`: Training script for the Semantic LSTM model.
-*   `train_enhanced_ids.py`: Training script for the Feature-based model.
-*   `tensorflow_semantic_inference.py`: Inference engine for the trained TensorFlow model.
+*   `detectors/`: Core detection logic (`tensorflow_semantic_inference.py`, `security_model.py`)
+*   `training/`: Model training scripts.
+*   `tools/`: Utility scripts.
+    *   `api_log_producer.py`: HTTP Inference Server.
+    *   `test_sample.py`: Atomic testing tool.
 *   `data/`: Contains raw logs and processed datasets.
 *   `models/` & `results/`: Stores trained model artifacts (`.h5`, `.keras`, `.pkl`).
+*   `idsdashboard.py`: Main dashboard application (TUI).
+*   `logprod.py`: Log streaming service.
+*   `test_log_producer.py`: Test data generator.
 
 ## 🤝 Contributors
 - **DzakirM** - *Initial Work*

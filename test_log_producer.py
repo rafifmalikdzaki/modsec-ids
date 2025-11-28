@@ -21,6 +21,9 @@ import pandas as pd
 import joblib
 import random
 import sys
+import json
+import urllib.request
+import urllib.error
 from typing import Dict, List, Optional
 
 # TensorFlow imports for semantic model testing
@@ -34,7 +37,7 @@ except ImportError:
 from detectors.data_preprocessor import SemanticTextPreprocessor
 
 class TestLogProducer:
-    def __init__(self, test_data_path: str, zmq_port: int = 5555, shuffle: bool = True):
+    def __init__(self, test_data_path: str, zmq_port: int = 5555, shuffle: bool = True, api_url: str = None):
         """
         Initialize the test log producer.
 
@@ -42,10 +45,12 @@ class TestLogProducer:
             test_data_path: Path to test .npz file
             zmq_port: ZeroMQ port for publishing
             shuffle: Whether to shuffle test data
+            api_url: Optional URL for remote inference API
         """
         self.test_data_path = test_data_path
         self.zmq_port = zmq_port
         self.shuffle = shuffle
+        self.api_url = api_url
 
         # Class mappings for realistic metadata
         self.class_to_attack_type = {
@@ -63,17 +68,52 @@ class TestLogProducer:
         self.load_test_data()
 
         # Setup ZeroMQ
-        self.setup_zmq()
+        # Only bind ZMQ if not using a remote API for inference
+        if not self.api_url:
+            self.context = zmq.Context()
+            self.socket = self.context.socket(zmq.PUB)
+            try:
+                self.socket.bind(f"tcp://*:{self.zmq_port}")
+                print(f"🚀 Test producer started on port {self.zmq_port}")
+            except zmq.error.ZMQError:
+                print(f"Error: Port {self.zmq_port} is in use. Is another producer running?")
+                sys.exit(1)
+        else:
+            self.socket = None # No local ZMQ binding
+            self.context = None # No ZMQ context needed
 
         # Initialize TensorFlow semantic model if available
         self.tf_model = None
-        if TENSORFLOW_INFERENCE_AVAILABLE:
+        
+        if self.api_url:
+            print(f"🌐 Using Remote API for inference: {self.api_url}")
+        elif TENSORFLOW_INFERENCE_AVAILABLE:
             try:
                 self.tf_model = TensorFlowSemanticInference()
                 print("🧠 TensorFlow Semantic Inference model loaded for testing.")
             except Exception as e:
                 print(f"⚠️  Failed to load TensorFlow Semantic Inference model: {e}")
                 self.tf_model = None
+
+    def _call_remote_api(self, log_line, metadata=None):
+        """Call the remote API for inference."""
+        try:
+            payload = {"log": log_line}
+            if metadata:
+                payload["metadata"] = metadata
+                
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                f"{self.api_url}/analyze", 
+                data=data, 
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return result['prediction'], result['confidence'], result['probabilities']
+        except Exception as e:
+            # print(f"⚠️ API Error: {e}")
+            return 'error', 0.0, {}
 
     def load_test_data(self):
         """Load test data and label encoder."""
@@ -109,17 +149,6 @@ class TestLogProducer:
         except Exception as e:
             print(f"Warning: Could not load original data: {e}")
             self.original_data = None
-
-    def setup_zmq(self):
-        """Setup ZeroMQ publisher."""
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.PUB)
-        try:
-            self.socket.bind(f"tcp://*:{self.zmq_port}")
-            print(f"🚀 Test producer started on port {self.zmq_port}")
-        except zmq.error.ZMQError:
-            print(f"Error: Port {self.zmq_port} is in use. Is another producer running?")
-            sys.exit(1)
 
     def generate_metadata(self, label_idx: int, sample_idx: int) -> Dict:
         """Generate realistic metadata for a test sample."""
@@ -248,9 +277,26 @@ class TestLogProducer:
                     'metadata': metadata
                 }
 
-                # Send via ZMQ (Topic: 'logs')
-                self.socket.send_string("logs", flags=zmq.SNDMORE)
-                self.socket.send_json(payload)
+                # Send via ZMQ (Topic: 'logs') or via API
+                if self.api_url:
+                    # Construct dummy log line if features don't easily reconstruct to raw log
+                    dummy_log_line = f"{metadata['method']} {metadata['uri']} HTTP/1.1"
+                    
+                    # Use helper method which now supports metadata
+                    label, conf, probs = self._call_remote_api(dummy_log_line, metadata)
+                    
+                    if label != 'error':
+                        # Use API's prediction for feedback print
+                        metadata['semantic_prediction'] = label
+                        metadata['true_label'] = label # Adjust true_label for feedback
+                        metadata['is_attack'] = label != 'normal'
+                    else:
+                        metadata['semantic_prediction'] = 'api_error'
+                        metadata['true_label'] = 'api_error'
+                        metadata['is_attack'] = False # Assume safe on error
+                else:
+                    self.socket.send_string("logs", flags=zmq.SNDMORE)
+                    self.socket.send_json(payload)
 
                 # Visual feedback
                 attack_indicator = "🔴" if metadata['true_label'] != 'normal' else "🟢"
@@ -261,8 +307,10 @@ class TestLogProducer:
         except KeyboardInterrupt:
             print("\n⏹️  Stopping test producer...")
         finally:
-            self.socket.close()
-            self.context.term()
+            if self.socket:
+                self.socket.close()
+            if self.context:
+                self.context.term()
             print("✅ Test producer stopped")
 
     def run_stats(self):
@@ -342,7 +390,19 @@ class TestLogProducer:
                 metadata['attack_type'] = self.class_to_attack_type.get(class_name, 'unknown')
                 
                 # Inject semantic prediction. If TF model is loaded, use it for a more realistic test.
-                if self.tf_model:
+                if self.api_url:
+                     # Use API for inference (using URI/payload from metadata or constructing a dummy log)
+                     # Ideally we would use the original raw log, but we only have features/metadata here.
+                     # We'll use the generated URI as a proxy for the log line.
+                     label, conf, probs = self._call_remote_api(f"GET {metadata['uri']} HTTP/1.1", metadata)
+                     if label != 'error':
+                        semantic_prediction_label = label
+                        semantic_confidence = float(conf)
+                        metadata['semantic_probs'] = probs
+                     else:
+                        semantic_prediction_label = class_name
+                        semantic_confidence = 0.98
+                elif self.tf_model:
                     try:
                         # For simplicity in test, we'll use the original log line for TF inference
                         # This assumes test_features can be reconstructed to original text or we have it.
@@ -364,13 +424,16 @@ class TestLogProducer:
                 metadata['semantic_confidence'] = semantic_confidence
                 metadata['is_attack'] = semantic_prediction_label != 'normal'
 
+                # Dummy features for payload (actual features not needed if API does inference)
+                # But to maintain dashboard compatibility for multi-class/binary fallback, we keep them.
                 payload = {
                     'features': features_list,
                     'metadata': metadata
                 }
 
-                self.socket.send_string("logs", flags=zmq.SNDMORE)
-                self.socket.send_json(payload)
+                if not self.api_url: # Only publish to ZMQ if not using remote API
+                    self.socket.send_string("logs", flags=zmq.SNDMORE)
+                    self.socket.send_json(payload)
 
                 # Feedback
                 status = "🟢" if class_name == 'normal' else f"🔴 {class_name.upper()}"
@@ -404,7 +467,16 @@ class TestLogProducer:
                     metadata['uri'] = self.generate_normal_uri()
                 
                 # Inject semantic prediction so dashboard picks it up
-                if self.tf_model:
+                if self.api_url:
+                     label, conf, probs = self._call_remote_api(f"GET {metadata['uri']} HTTP/1.1", metadata)
+                     if label != 'error':
+                        semantic_prediction_label = label
+                        semantic_confidence = float(conf)
+                        metadata['semantic_probs'] = probs
+                     else:
+                        semantic_prediction_label = class_name
+                        semantic_confidence = 0.99 if class_name != 'normal' else 0.95
+                elif self.tf_model:
                     try:
                         # For synthetic data, we can't do real inference easily without a raw log.
                         # For now, just mirror the class_name for semantic_prediction
@@ -433,8 +505,9 @@ class TestLogProducer:
                     'metadata': metadata
                 }
 
-                self.socket.send_string("logs", flags=zmq.SNDMORE)
-                self.socket.send_json(payload)
+                if not self.api_url: # Only publish to ZMQ if not using remote API
+                    self.socket.send_string("logs", flags=zmq.SNDMORE)
+                    self.socket.send_json(payload)
 
                 status = "🟢" if class_name == 'normal' else f"🔴 {class_name.upper()}"
                 print(f"{status} Sent: {metadata['uri'][:60]}")
@@ -455,10 +528,23 @@ class TestLogProducer:
                 'method': 'GET', 'status': '200',
                 'semantic_prediction': 'normal', 'semantic_confidence': 1.0
             }
-            payload = {'features': [0.0]*10, 'metadata': metadata}
             
-            self.socket.send_string("logs", flags=zmq.SNDMORE)
-            self.socket.send_json(payload)
+            if self.api_url:
+                try:
+                    data = json.dumps({"log": metadata['uri']}).encode('utf-8')
+                    req = urllib.request.Request(
+                        f"{self.api_url}/analyze", 
+                        data=data, 
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    with urllib.request.urlopen(req) as response:
+                        pass # Don't care about response for benchmark
+                except Exception as e:
+                    print(f"⚠️ API Error during benchmark: {e}")
+            else:
+                payload = {'features': [0.0]*10, 'metadata': metadata}
+                self.socket.send_string("logs", flags=zmq.SNDMORE)
+                self.socket.send_json(payload)
         
         duration = time.time() - start_time
         rate = iterations / duration
@@ -485,12 +571,10 @@ def main():
     parser.add_argument("--benchmark", action="store_true", help="Run performance benchmark")
     parser.add_argument("--iterations", type=int, default=1000, help="Number of iterations for benchmark")
     parser.add_argument("--full-test", action="store_true", help="Stream the entire loaded test set (implies --comprehensive-test)")
+    parser.add_argument("--api-url", type=str, help="URL of the API Log Producer (e.g., http://localhost:8000)")
 
     args = parser.parse_args()
 
-    # Check if test data exists for standard mode (only if NOT running a special mode)
-    special_mode = args.benchmark or args.comprehensive_test or args.attack_type
-    
     # Check if test data exists for standard mode (only if NOT running a special mode)
     special_mode = args.benchmark or args.comprehensive_test or args.attack_type
     
@@ -502,12 +586,12 @@ def main():
     producer = None
     try:
         # Try to load with provided data path
-        producer = TestLogProducer(args.test_data, args.port, args.shuffle)
+        producer = TestLogProducer(args.test_data, args.port, args.shuffle, api_url=args.api_url)
     except FileNotFoundError:
         if special_mode:
             print(f"⚠️  Test data '{args.test_data}' not found. Falling back to synthetic generation.")
             # Fallback to dummy mode
-            producer = TestLogProducer("dummy", args.port, False)
+            producer = TestLogProducer("dummy", args.port, False, api_url=args.api_url)
         else:
             print(f"❌ Error: Test data file not found: {args.test_data}")
             print("   Run 'python train_enhanced_ids.py --preprocess --train' first")

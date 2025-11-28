@@ -1,6 +1,7 @@
 import os
 import pickle
 import numpy as np
+import urllib.parse
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
@@ -23,8 +24,11 @@ class TensorFlowSemanticInference:
     def _load_artifacts(self):
         """Load model, tokenizer, and label encoder."""
         try:
-            # Load Model
-            model_path = os.path.join(self.model_dir, 'final_model.keras')
+            # Load Model (Prefer best_model.keras)
+            model_path = os.path.join(self.model_dir, 'best_model.keras')
+            if not os.path.exists(model_path):
+                model_path = os.path.join(self.model_dir, 'final_model.keras')
+            
             if not os.path.exists(model_path):
                 logging.error(f"Model not found at {model_path}")
                 return
@@ -53,6 +57,26 @@ class TensorFlowSemanticInference:
         except Exception as e:
             logging.error(f"Error loading artifacts: {e}")
 
+    def _preprocess_text(self, text):
+        """Add spaces around special characters so they are tokenized."""
+        if not isinstance(text, str):
+            return ""
+            
+        # 1. URL Decode first
+        try:
+            text = urllib.parse.unquote(text)
+        except Exception:
+            pass
+            
+        # 2. Lowercase
+        text = text.lower()
+        
+        # 3. Space out special characters
+        special_chars = '!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\''
+        for char in special_chars:
+            text = text.replace(char, f' {char} ')
+        return " ".join(text.split())
+
     def predict(self, text):
         """
         Predict the class of a given log line/text.
@@ -63,7 +87,10 @@ class TensorFlowSemanticInference:
 
         try:
             # Preprocess
-            sequences = self.tokenizer.texts_to_sequences([text])
+            clean_text = self._preprocess_text(text)
+            print(f"DEBUG: Preprocessed text: '{clean_text}'") # Debug
+            sequences = self.tokenizer.texts_to_sequences([clean_text])
+            print(f"DEBUG: Sequences: {sequences}") # Debug
             padded = pad_sequences(sequences, maxlen=self.max_seq_length, padding='post', truncating='post')
 
             # Inference
