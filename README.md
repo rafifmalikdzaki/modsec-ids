@@ -92,7 +92,7 @@ If you need to retrain the models on new data:
 uv run python training/train_tensorflow_working.py --input data/raw/Modsec-WP.csv --epochs 20
 ```
 *   **Input**: Raw CSV dataset.
-*   **Preprocessing**: URL Decoding -> Lowercasing -> Character Tokenization.
+*   **Preprocessing**: URL Decoding -> Lowercasing -> BPE Tokenization.
 *   **Balancing**: Automatic oversampling of minority classes (XSS, RCE, etc.) and undersampling of majority (SQLi).
 
 ## 📂 Project Structure

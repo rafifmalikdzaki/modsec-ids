@@ -4,7 +4,7 @@ This document details the architecture of the deep learning model used in the Mo
 
 ## 🚀 Overview
 
-The model is a **Character-Aware Convolutional Neural Network (CNN) followed by a Bidirectional Long Short-Short Term Memory (Bi-LSTM) network**, using **Byte-Pair Encoding (BPE)** for tokenization and augmented with **Feature Flags**. This hybrid approach combines the strengths of subword tokenization, local feature extraction (CNN), and sequential context understanding (LSTM) to detect complex attack patterns.
+The model is a **Character-Aware Convolutional Neural Network (CNN) followed by a Bidirectional Long Short-Short Term Memory (Bi-LSTM) network**, using **Byte-Pair Encoding (BPE)** for tokenization. This hybrid approach combines the strengths of subword tokenization, local feature extraction (CNN), and sequential context understanding (LSTM) to detect complex attack patterns.
 
 ## 🧱 Architecture Details
 
@@ -33,7 +33,7 @@ The model is built using TensorFlow/Keras and consists of the following layers:
 5.  **Bidirectional LSTM Layer (Bi-LSTM for sequential context)**:
     *   `tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(HIDDEN_DIM, return_sequences=False, dropout=DROPOUT))`
     *   Processes the sequence in both forward and backward directions, capturing long-range dependencies and contextual information from the locally extracted CNN features.
-    *   `HIDDEN_DIM`: `128` (number of units in the LSTM cells).
+    *   `HIDDEN_DIM`: `256` (number of units in the LSTM cells).
     *   `dropout=DROPOUT`: `0.4` (regularization to prevent overfitting).
     *   `return_sequences=False`: Only returns the output from the last timestep, suitable for classification.
 
@@ -54,7 +54,6 @@ The model is built using TensorFlow/Keras and consists of the following layers:
 ## 💡 Key Design Principles
 
 *   **Subword Tokenization (BPE)**: Breaks text into subword units, effectively handling out-of-vocabulary words and common obfuscation techniques (e.g., `select` becomes `sel`, `ect` if `select` isn't in vocabulary, but `sel` and `ect` might be). It also learns specific subwords like `http://` or `union`.
-*   **Feature Injection**: Prepending heuristic flags (e.g., `[FLAG_SQLI]`) directly into the input text provides explicit, strong signals to the model, guiding its attention towards highly suspicious patterns. These flags are treated as special tokens by the BPE tokenizer.
 *   **Hybrid CNN-LSTM**: The CNN layer excels at finding local patterns (like specific character sequences in a URL or payload), while the LSTM layer captures the broader context and dependencies across the entire (subword) sequence. This combination is highly effective for security contexts where both local and global patterns matter.
 *   **Class Imbalance Handling**: The training pipeline uses dataset balancing (oversampling minorities, undersampling majorities) and class weights during training to ensure the model learns effectively from rare attack types.
 
@@ -62,7 +61,7 @@ The model is built using TensorFlow/Keras and consists of the following layers:
 
 *   `VOCAB_SIZE`: `10000` (BPE vocabulary size).
 *   `EMBEDDING_DIM`: `64`.
-*   `HIDDEN_DIM`: `128` (LSTM units).
+*   `HIDDEN_DIM`: `256` (LSTM units).
 *   `MAX_SEQ_LENGTH`: `256` (maximum sequence length in BPE tokens).
 *   `DROPOUT`: `0.4`.
 *   `BATCH_SIZE`: `32`.

@@ -33,10 +33,10 @@ from tokenizers.processors import BertProcessing
 
 # Configuration
 VOCAB_SIZE = 10000
-EMBEDDING_DIM = 64
-HIDDEN_DIM = 128
+EMBEDDING_DIM = 128
+HIDDEN_DIM = 512
 DROPOUT = 0.4
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0001
 EPOCHS = 20
 BATCH_SIZE = 32
 MAX_SEQ_LENGTH = 256 # Increased to 500
@@ -44,11 +44,6 @@ MAX_SEQ_LENGTH = 256 # Increased to 500
 # Classes
 CLASSES = ['normal', 'sqli', 'bruteforce', 'lfi', 'xss', 'rce', 'directory_traversal', 'command_injection', 'rfi']
 OUTPUT_DIM = len(CLASSES)
-
-# Special Feature Flags
-FEATURE_FLAGS = [
-    "[FLAG_RFI]", "[FLAG_LFI]", "[FLAG_XSS]", "[FLAG_SQLI]", "[FLAG_RCE]", "[FLAG_TRAVERSAL]"
-]
 
 def setup_tensorflow():
     print("🔧 Setting up TensorFlow...")
@@ -67,7 +62,7 @@ def setup_tensorflow():
         return False
 
 def preprocess_text(text):
-    """Preprocessing with Feature Injection."""
+    """Basic Preprocessing (without Feature Injection)."""
     if not isinstance(text, str):
         return ""
     
@@ -77,44 +72,17 @@ def preprocess_text(text):
     except Exception:
         pass
         
-    # 2. Lowercase
+    # 2. Lowercase and strip whitespace
     text = text.lower().strip()
-    
-    # 3. Feature Injection (Heuristic hints)
-    flags = []
-    
-    # RFI: http/https in parameters
-    if "http://" in text or "https://" in text or "ftp://" in text:
-        flags.append("[FLAG_RFI]")
-        
-    # Traversal / LFI
-    if "../" in text or "..\\\\" in text or "/etc/passwd" in text or "win.ini" in text:
-        flags.append("[FLAG_TRAVERSAL]")
-        
-    # XSS
-    if "<script" in text or "javascript:" in text or "onerror=" in text or "onload=" in text:
-        flags.append("[FLAG_XSS]")
-        
-    # SQLi
-    if "union select" in text or " or 1=1" in text or "'--" in text or "information_schema" in text:
-        flags.append("[FLAG_SQLI]")
-        
-    # RCE
-    if "; cat" in text or "| ls" in text or "$(whoami)" in text or "; system" in text:
-        flags.append("[FLAG_RCE]")
-
-    # Append flags to text
-    if flags:
-        text = " ".join(flags) + " " + text
-        
+            
     return text
 
-def balance_dataset(df, target_count=5000, min_count=1000):
+def balance_dataset(df, classes, target_count=5000, min_count=1000):
     print("\n⚖️  Balancing TRAINING dataset...")
     df['label'] = df['label'].astype(str).str.lower().str.strip()
     
     balanced_dfs = []
-    for label in CLASSES:
+    for label in classes:
         class_df = df[df['label'] == label]
         count = len(class_df)
         if count == 0: continue
@@ -128,29 +96,28 @@ def balance_dataset(df, target_count=5000, min_count=1000):
             
     return pd.concat(balanced_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
 
-def prepare_data_splits(df):
+def prepare_data_splits(df, initial_classes, initial_output_dim):
     print("📊 Preparing data splits...")
-    global CLASSES
-    global OUTPUT_DIM
+    
+    current_classes = list(initial_classes)
+    current_output_dim = initial_output_dim
     
     df['label'] = df['label'].astype(str).str.lower().str.strip()
     df.loc[df['label'] == 'path traversal', 'label'] = 'directory_traversal'
-    df = df[df['label'].isin(CLASSES)]
+    df = df[df['label'].isin(current_classes)]
     
     if 'command_injection' in df['label'].unique() and len(df[df['label'] == 'command_injection']) == 0:
-        CLASSES = [cls for cls in CLASSES if cls != 'command_injection']
-        OUTPUT_DIM = len(CLASSES)
-        print(f"⚠️ Removed 'command_injection'. New CLASSES: {CLASSES}")
+        current_classes = [cls for cls in current_classes if cls != 'command_injection']
+        current_output_dim = len(current_classes)
+        print(f"⚠️ Removed 'command_injection'. New CLASSES: {current_classes}")
 
     print("   Constructing text features...")
     df['combined_text'] = (
-        df['request_line_method'].fillna('') + " " +
-        df['request_line_url'].fillna('') + " " +
-        df['action_message'].fillna('') + " " + 
-        df['request_body'].fillna('')
-    )
+                df['request_line_url'].fillna('') + " " +
+                df['action_message'].fillna('') + " " +
+                df['request_body'].fillna('')    )
     
-    print("   Preprocessing texts (with feature injection)...")
+    print("   Preprocessing texts (without feature injection)...")
     df['clean_text'] = df['combined_text'].apply(preprocess_text)
     
     print("\n   Class distribution before splitting:")
@@ -166,12 +133,12 @@ def prepare_data_splits(df):
 
     train_df, test_df = train_test_split(df, test_size=0.2, stratify=temp_y, random_state=42)
     
-    train_df_balanced = balance_dataset(train_df, target_count=10000, min_count=2000)
+    train_df_balanced = balance_dataset(train_df, current_classes, target_count=10000, min_count=2000)
     print(f"   Balanced Train size: {len(train_df_balanced)}")
     
-    return train_df_balanced, test_df
+    return train_df_balanced, test_df, current_classes, current_output_dim
 
-def create_model(vocab_size, max_seq_length, num_classes):
+def create_model(vocab_size, max_seq_length, num_classes, learning_rate):
     print("🏗️  Building Subword LSTM model...")
     model = Sequential([
         Embedding(vocab_size, output_dim=EMBEDDING_DIM, input_length=max_seq_length),
@@ -182,7 +149,8 @@ def create_model(vocab_size, max_seq_length, num_classes):
         Dropout(DROPOUT),
         Dense(num_classes, activation='softmax')
     ])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
     return model
 
 def train_tokenizer(texts, vocab_size):
@@ -192,8 +160,8 @@ def train_tokenizer(texts, vocab_size):
             f.write(str(text) + "\n")
             
     tokenizer = ByteLevelBPETokenizer()
-    # Add custom flags to special tokens so they are learned as single tokens
-    special_tokens = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"] + FEATURE_FLAGS
+    # No custom flags in special tokens after removing feature injection
+    special_tokens = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"] 
     
     tokenizer.train(files=["temp_corpus.txt"], vocab_size=vocab_size, min_frequency=2, special_tokens=special_tokens)
     
@@ -205,7 +173,7 @@ def encode_texts(tokenizer, texts, max_len):
     sequences = [e.ids for e in encodings]
     return pad_sequences(sequences, maxlen=max_len, padding='post', truncating='post')
 
-def evaluate_model(model, tokenizer, label_encoder, X_test, y_test):
+def evaluate_model(model, tokenizer, label_encoder, X_test, y_test, classes):
     print("📊 Evaluating model on Real-World Test Set...")
     loss, accuracy = model.evaluate(X_test, y_test, verbose=0)
     print(f"Test Loss: {loss:.4f}")
@@ -219,20 +187,20 @@ def evaluate_model(model, tokenizer, label_encoder, X_test, y_test):
     report = classification_report(
         y_test_int, 
         y_pred_classes, 
-        target_names=label_encoder.classes_,
+        target_names=classes,
         zero_division=0, 
-        labels=list(range(len(label_encoder.classes_)))
+        labels=list(range(len(classes)))
     )
     print(report)
 
-def train_model(model, train_df, test_df, vocab_size, max_seq_length, epochs, batch_size, output_dir):
+def train_model(model, train_df, test_df, vocab_size, max_seq_length, epochs, batch_size, output_dir, classes):
     print("🚀 Starting training pipeline...")
 
     label_encoder = LabelEncoder()
-    label_encoder.fit(CLASSES)
+    label_encoder.fit(classes)
     
-    y_train = to_categorical(label_encoder.transform(train_df['label']), num_classes=len(CLASSES))
-    y_test = to_categorical(label_encoder.transform(test_df['label']), num_classes=len(CLASSES))
+    y_train = to_categorical(label_encoder.transform(train_df['label']), num_classes=len(classes))
+    y_test = to_categorical(label_encoder.transform(test_df['label']), num_classes=len(classes))
 
     tokenizer = train_tokenizer(train_df['clean_text'], vocab_size)
     
@@ -282,12 +250,15 @@ def main():
     if not os.path.exists(args.input): return 1
     df = pd.read_csv(args.input, low_memory=False)
     
-    train_df, test_df = prepare_data_splits(df)
-    model = create_model(VOCAB_SIZE, MAX_SEQ_LENGTH, len(CLASSES))
+    global CLASSES
+    global OUTPUT_DIM
     
-    model, tokenizer, label_encoder, X_test, y_test = train_model(model, train_df, test_df, VOCAB_SIZE, MAX_SEQ_LENGTH, args.epochs, args.batch_size, args.output_dir)
+    train_df, test_df, CLASSES, OUTPUT_DIM = prepare_data_splits(df, CLASSES, OUTPUT_DIM)
+    model = create_model(VOCAB_SIZE, MAX_SEQ_LENGTH, len(CLASSES), LEARNING_RATE)
     
-    evaluate_model(model, tokenizer, label_encoder, X_test, y_test)
+    model, tokenizer, label_encoder, X_test, y_test = train_model(model, train_df, test_df, VOCAB_SIZE, MAX_SEQ_LENGTH, args.epochs, args.batch_size, args.output_dir, CLASSES)
+    
+    evaluate_model(model, tokenizer, label_encoder, X_test, y_test, CLASSES)
     
     return 0
 

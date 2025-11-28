@@ -74,35 +74,9 @@ class TensorFlowSemanticInference:
         # 2. Lowercase
         text = text.lower().strip()
         
-        # 3. Feature Injection (Heuristic hints)
-        flags = []
-        
-        # RFI: http/https in parameters
-        if "http://" in text or "https://" in text or "ftp://" in text:
-            flags.append("[FLAG_RFI]")
-            
-        # Traversal / LFI
-        if "../" in text or "..\\" in text or "/etc/passwd" in text or "win.ini" in text:
-            flags.append("[FLAG_TRAVERSAL]")
-            
-        # XSS
-        if "<script" in text or "javascript:" in text or "onerror=" in text or "onload=" in text:
-            flags.append("[FLAG_XSS]")
-            
-        # SQLi
-        if "union select" in text or " or 1=1" in text or "'--" in text or "information_schema" in text:
-            flags.append("[FLAG_SQLI]")
-            
-        # RCE
-        if "; cat" in text or "| ls" in text or "$(whoami)" in text or "; system" in text:
-            flags.append("[FLAG_RCE]")
-
-        # Append flags to text
-        if flags:
-            text = " ".join(flags) + " " + text
+        # Removed Feature Injection (Heuristic hints) as it was causing misclassification
             
         return text
-
     def predict(self, text):
         if not self.model or not self.tokenizer:
             return "error", 0.0, {}

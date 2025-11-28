@@ -28,6 +28,7 @@ def test_sample(detector, sample):
     """Run prediction on a single sample."""
     print(f"\n📝 Analyzing Sample:")
     print(f"   {sample}")
+    print(f"DEBUG: Raw sample sent to detector.predict: {sample[:100]}...")
     
     try:
         label, conf, probs = detector.predict(sample)
