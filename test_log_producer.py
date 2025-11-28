@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 
 # TensorFlow imports for semantic model testing
 try:
-    from tensorflow_semantic_inference import TensorFlowSemanticClassifier
+    from tensorflow_semantic_inference import TensorFlowSemanticInference
     TENSORFLOW_INFERENCE_AVAILABLE = True
 except ImportError:
     TENSORFLOW_INFERENCE_AVAILABLE = False
@@ -64,6 +64,16 @@ class TestLogProducer:
 
         # Setup ZeroMQ
         self.setup_zmq()
+
+        # Initialize TensorFlow semantic model if available
+        self.tf_model = None
+        if TENSORFLOW_INFERENCE_AVAILABLE:
+            try:
+                self.tf_model = TensorFlowSemanticInference()
+                print("🧠 TensorFlow Semantic Inference model loaded for testing.")
+            except Exception as e:
+                print(f"⚠️  Failed to load TensorFlow Semantic Inference model: {e}")
+                self.tf_model = None
 
     def load_test_data(self):
         """Load test data and label encoder."""
@@ -331,10 +341,28 @@ class TestLogProducer:
                 metadata['true_label'] = class_name
                 metadata['attack_type'] = self.class_to_attack_type.get(class_name, 'unknown')
                 
-                # Inject semantic prediction matching the real label for visualization
-                metadata['semantic_prediction'] = class_name
-                metadata['semantic_confidence'] = 0.98
-                metadata['is_attack'] = class_name != 'normal'
+                # Inject semantic prediction. If TF model is loaded, use it for a more realistic test.
+                if self.tf_model:
+                    try:
+                        # For simplicity in test, we'll use the original log line for TF inference
+                        # This assumes test_features can be reconstructed to original text or we have it.
+                        # For now, let's just make a dummy semantic prediction based on true_label
+                        # TODO: Actual semantic inference on the raw text corresponding to `features`
+                        semantic_prediction_label = class_name
+                        semantic_confidence = 0.98
+                        metadata['semantic_probs'] = {cn: 0.01 for cn in self.class_names} # dummy
+                        metadata['semantic_probs'][class_name] = semantic_confidence # dummy
+                    except Exception as e:
+                        print(f"⚠️  Error during TF semantic inference: {e}. Falling back to true_label.")
+                        semantic_prediction_label = class_name
+                        semantic_confidence = 0.98
+                else:
+                    semantic_prediction_label = class_name
+                    semantic_confidence = 0.98
+
+                metadata['semantic_prediction'] = semantic_prediction_label
+                metadata['semantic_confidence'] = semantic_confidence
+                metadata['is_attack'] = semantic_prediction_label != 'normal'
 
                 payload = {
                     'features': features_list,
@@ -376,9 +404,26 @@ class TestLogProducer:
                     metadata['uri'] = self.generate_normal_uri()
                 
                 # Inject semantic prediction so dashboard picks it up
-                metadata['semantic_prediction'] = class_name
-                metadata['semantic_confidence'] = 0.99 if class_name != 'normal' else 0.95
-                metadata['is_attack'] = class_name != 'normal'
+                if self.tf_model:
+                    try:
+                        # For synthetic data, we can't do real inference easily without a raw log.
+                        # For now, just mirror the class_name for semantic_prediction
+                        # TODO: Create a synthetic raw log based on metadata for real TF inference
+                        semantic_prediction_label = class_name
+                        semantic_confidence = 0.99 if class_name != 'normal' else 0.95
+                        metadata['semantic_probs'] = {cn: 0.01 for cn in self.class_names} # dummy
+                        metadata['semantic_probs'][class_name] = semantic_confidence # dummy
+                    except Exception as e:
+                        print(f"⚠️  Error during TF semantic inference: {e}. Falling back to class_name.")
+                        semantic_prediction_label = class_name
+                        semantic_confidence = 0.99 if class_name != 'normal' else 0.95
+                else:
+                    semantic_prediction_label = class_name
+                    semantic_confidence = 0.99 if class_name != 'normal' else 0.95
+
+                metadata['semantic_prediction'] = semantic_prediction_label
+                metadata['semantic_confidence'] = semantic_confidence
+                metadata['is_attack'] = semantic_prediction_label != 'normal'
 
                 # Dummy features
                 features_list = [0.0] * 10
@@ -439,6 +484,7 @@ def main():
     parser.add_argument("--attack-type", action="append", help="Test specific attack type (can be used multiple times)")
     parser.add_argument("--benchmark", action="store_true", help="Run performance benchmark")
     parser.add_argument("--iterations", type=int, default=1000, help="Number of iterations for benchmark")
+    parser.add_argument("--full-test", action="store_true", help="Stream the entire loaded test set (implies --comprehensive-test)")
 
     args = parser.parse_args()
 
@@ -479,9 +525,19 @@ def main():
         producer.run_benchmark(args.iterations)
         return
 
-    if args.comprehensive_test:
-        # All classes
-        producer.run_synthetic_test(None, count=100, delay=args.delay)
+    if args.comprehensive_test or args.full_test:
+        if args.full_test:
+            # Override count to stream the entire test set
+            if hasattr(producer, 'test_features'):
+                test_count = len(producer.test_features)
+                print(f"Streaming ALL {test_count} samples from the test set.")
+            else:
+                print("Cannot determine test set size, using default 100 samples.")
+                test_count = 100 # Fallback if test_features is not loaded
+        else:
+            test_count = 100 # Default for --comprehensive-test
+
+        producer.run_synthetic_test(None, count=test_count, delay=args.delay)
         return
         
     if args.attack_type:
