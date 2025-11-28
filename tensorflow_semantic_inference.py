@@ -73,9 +73,19 @@ class TensorFlowSemanticInference:
             class_idx = np.argmax(preds)
             confidence = float(preds[class_idx])
             
+            predicted_label = None
             if self.label_encoder:
-                predicted_label = self.label_encoder.inverse_transform([class_idx])[0]
-            else:
+                try:
+                    encoded_val = self.label_encoder.inverse_transform([class_idx])[0]
+                    # If encoder returns an integer (was trained on indices), map it to string class
+                    if isinstance(encoded_val, (int, np.integer)):
+                         predicted_label = self.classes[encoded_val] if encoded_val < len(self.classes) else "unknown"
+                    else:
+                         predicted_label = str(encoded_val)
+                except Exception:
+                    pass
+
+            if predicted_label is None:
                 predicted_label = self.classes[class_idx] if class_idx < len(self.classes) else "unknown"
 
             # Format probabilities
